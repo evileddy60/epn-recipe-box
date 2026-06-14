@@ -1,1 +1,3 @@
-﻿__pycache__/
+__pycache__/
+*.db
+static/uploads/

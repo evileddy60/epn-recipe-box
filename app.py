@@ -1,11 +1,14 @@
 import json
+import os
 import re
+import sqlite3
 import uuid
 from datetime import datetime
 from pathlib import Path
 
 from flask import Flask, flash, redirect, render_template_string, request, session, url_for
 from jinja2 import DictLoader
+from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.utils import secure_filename
 
 
@@ -13,7 +16,7 @@ APP_TITLE = "EPN Recipe Box"
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 UPLOAD_DIR = STATIC_DIR / "uploads"
-DATA_FILE = BASE_DIR / "recipe_data.json"
+DB_FILE = BASE_DIR / "recipe_box.db"
 ALLOWED_IMAGE_EXTENSIONS = {"png", "jpg", "jpeg", "gif", "webp"}
 
 STATIC_DIR.mkdir(exist_ok=True)
@@ -50,67 +53,282 @@ def allowed_image(filename: str) -> bool:
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_IMAGE_EXTENSIONS
 
 
-def load_data() -> dict:
-    if DATA_FILE.exists():
-        with DATA_FILE.open("r", encoding="utf-8") as handle:
-            return json.load(handle)
+def db_connect() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    return conn
 
-    data = {
-        "users": [
-            {
-                "id": "u-demo",
-                "name": "Maya Spooner",
-                "location": "Toronto, ON",
-                "bio": "Weeknight cook, card collector, and soup optimist.",
-                "avatar": "",
-                "inventory": ["tomatoes", "garlic", "basil", "pasta", "eggs", "cheddar"],
-                "created_at": now_iso(),
-            }
-        ],
-        "recipes": [
-            {
-                "id": "r-tomato-pasta",
-                "owner_id": "u-demo",
-                "title": "Tomato Basil Pantry Pasta",
-                "summary": "A bright, fast dinner built from the things that are usually already waiting around.",
-                "prep_time": "25 min",
-                "servings": "2",
-                "ingredients": ["pasta", "tomatoes", "garlic", "basil", "olive oil", "parmesan"],
-                "steps": [
-                    "Boil pasta in salted water until just tender.",
-                    "Warm olive oil with sliced garlic, then add chopped tomatoes.",
-                    "Toss pasta with the sauce, basil, and a splash of pasta water.",
-                    "Finish with parmesan and black pepper.",
-                ],
-                "ratings": [{"user_id": "u-demo", "score": 5}],
-                "comments": [
-                    {
-                        "id": "c-demo",
-                        "user_id": "u-demo",
-                        "body": "Save a little pasta water. It makes the sauce cling beautifully.",
-                        "created_at": now_iso(),
-                    }
-                ],
-                "created_at": now_iso(),
-                "updated_at": now_iso(),
-            }
-        ],
+
+def init_db() -> None:
+    with db_connect() as conn:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                id TEXT PRIMARY KEY,
+                email TEXT NOT NULL UNIQUE,
+                password_hash TEXT NOT NULL,
+                nickname TEXT NOT NULL DEFAULT '',
+                bio TEXT NOT NULL DEFAULT '',
+                avatar TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS inventory_items (
+                user_id TEXT NOT NULL,
+                item TEXT NOT NULL,
+                position INTEGER NOT NULL,
+                PRIMARY KEY (user_id, item),
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS recipes (
+                id TEXT PRIMARY KEY,
+                owner_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                prep_time TEXT NOT NULL,
+                servings TEXT NOT NULL,
+                ingredients_json TEXT NOT NULL,
+                steps_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (owner_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS ratings (
+                recipe_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                score INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (recipe_id, user_id),
+                FOREIGN KEY (recipe_id) REFERENCES recipes(id) ON DELETE CASCADE,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS comments (
+                id TEXT PRIMARY KEY,
+                recipe_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                body TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (recipe_id) REFERENCES recipes(id) ON DELETE CASCADE,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+            """
+        )
+        user_columns = {row["name"] for row in conn.execute("PRAGMA table_info(users)")}
+        if "email" not in user_columns:
+            conn.execute("ALTER TABLE users ADD COLUMN email TEXT NOT NULL DEFAULT ''")
+        if "password_hash" not in user_columns:
+            conn.execute("ALTER TABLE users ADD COLUMN password_hash TEXT NOT NULL DEFAULT ''")
+        if "nickname" not in user_columns:
+            conn.execute("ALTER TABLE users ADD COLUMN nickname TEXT NOT NULL DEFAULT ''")
+            if "name" in user_columns:
+                conn.execute("UPDATE users SET nickname = name WHERE nickname = ''")
+
+
+def row_to_user(row: sqlite3.Row, inventory: list[str] | None = None) -> dict:
+    nickname = row["nickname"] or row["email"]
+    return {
+        "id": row["id"],
+        "email": row["email"],
+        "password_hash": row["password_hash"],
+        "nickname": row["nickname"],
+        "name": nickname,
+        "bio": row["bio"],
+        "avatar": row["avatar"],
+        "inventory": inventory or [],
+        "created_at": row["created_at"],
     }
-    save_data(data)
-    return data
 
 
-def save_data(data: dict) -> None:
-    with DATA_FILE.open("w", encoding="utf-8") as handle:
-        json.dump(data, handle, indent=2)
+def row_to_recipe(row: sqlite3.Row, ratings: list[dict] | None = None, comments: list[dict] | None = None) -> dict:
+    return {
+        "id": row["id"],
+        "owner_id": row["owner_id"],
+        "title": row["title"],
+        "summary": row["summary"],
+        "prep_time": row["prep_time"],
+        "servings": row["servings"],
+        "ingredients": json.loads(row["ingredients_json"]),
+        "steps": json.loads(row["steps_json"]),
+        "ratings": ratings or [],
+        "comments": comments or [],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def load_data() -> dict:
+    init_db()
+    with db_connect() as conn:
+        inventory_by_user = {}
+        for row in conn.execute("SELECT user_id, item FROM inventory_items ORDER BY position, item"):
+            inventory_by_user.setdefault(row["user_id"], []).append(row["item"])
+
+        users = [
+            row_to_user(row, inventory_by_user.get(row["id"], []))
+            for row in conn.execute("SELECT * FROM users ORDER BY created_at")
+        ]
+
+        ratings_by_recipe = {}
+        for row in conn.execute("SELECT recipe_id, user_id, score FROM ratings"):
+            ratings_by_recipe.setdefault(row["recipe_id"], []).append(
+                {"user_id": row["user_id"], "score": row["score"]}
+            )
+
+        comments_by_recipe = {}
+        for row in conn.execute("SELECT id, recipe_id, user_id, body, created_at FROM comments ORDER BY created_at"):
+            comments_by_recipe.setdefault(row["recipe_id"], []).append(
+                {
+                    "id": row["id"],
+                    "user_id": row["user_id"],
+                    "body": row["body"],
+                    "created_at": row["created_at"],
+                }
+            )
+
+        recipes = [
+            row_to_recipe(row, ratings_by_recipe.get(row["id"], []), comments_by_recipe.get(row["id"], []))
+            for row in conn.execute("SELECT * FROM recipes ORDER BY created_at DESC")
+        ]
+
+    return {"users": users, "recipes": recipes}
+
+
+def create_account(email: str, password: str) -> str:
+    user_id = f"u-{uuid.uuid4().hex[:10]}"
+    with db_connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO users (id, email, password_hash, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (user_id, email.lower(), generate_password_hash(password), now_iso()),
+        )
+    return user_id
+
+
+def authenticate_user(email: str, password: str) -> str | None:
+    init_db()
+    with db_connect() as conn:
+        row = conn.execute(
+            "SELECT id, password_hash FROM users WHERE lower(email) = lower(?)",
+            (email.strip(),),
+        ).fetchone()
+    if row and check_password_hash(row["password_hash"], password):
+        return row["id"]
+    return None
+
+
+def update_profile(user_id: str, nickname: str, bio: str, avatar: str) -> None:
+    with db_connect() as conn:
+        if avatar:
+            conn.execute(
+                "UPDATE users SET nickname = ?, bio = ?, avatar = ? WHERE id = ?",
+                (nickname, bio, avatar, user_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE users SET nickname = ?, bio = ? WHERE id = ?",
+                (nickname, bio, user_id),
+            )
+
+
+def update_inventory(user_id: str, items: list[str]) -> None:
+    unique_items = list(dict.fromkeys(items))
+    with db_connect() as conn:
+        conn.execute("DELETE FROM inventory_items WHERE user_id = ?", (user_id,))
+        conn.executemany(
+            "INSERT INTO inventory_items (user_id, item, position) VALUES (?, ?, ?)",
+            [(user_id, item, position) for position, item in enumerate(unique_items)],
+        )
+
+
+def create_recipe(owner_id: str, form) -> str:
+    recipe_id = f"r-{uuid.uuid4().hex[:10]}"
+    timestamp = now_iso()
+    with db_connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO recipes (
+                id, owner_id, title, summary, prep_time, servings,
+                ingredients_json, steps_json, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                recipe_id,
+                owner_id,
+                form["title"].strip(),
+                form["summary"].strip(),
+                form["prep_time"].strip(),
+                form["servings"].strip(),
+                json.dumps(split_ingredients(form["ingredients"])),
+                json.dumps(split_lines(form["steps"])),
+                timestamp,
+                timestamp,
+            ),
+        )
+    return recipe_id
+
+
+def update_recipe(recipe_id: str, form) -> None:
+    with db_connect() as conn:
+        conn.execute(
+            """
+            UPDATE recipes
+            SET title = ?, summary = ?, prep_time = ?, servings = ?,
+                ingredients_json = ?, steps_json = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                form["title"].strip(),
+                form["summary"].strip(),
+                form["prep_time"].strip(),
+                form["servings"].strip(),
+                json.dumps(split_ingredients(form["ingredients"])),
+                json.dumps(split_lines(form["steps"])),
+                now_iso(),
+                recipe_id,
+            ),
+        )
+
+
+def save_rating(recipe_id: str, user_id: str, score: int) -> None:
+    with db_connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO ratings (recipe_id, user_id, score, created_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(recipe_id, user_id)
+            DO UPDATE SET score = excluded.score, created_at = excluded.created_at
+            """,
+            (recipe_id, user_id, score, now_iso()),
+        )
+
+
+def create_comment(recipe_id: str, user_id: str, body: str) -> None:
+    with db_connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO comments (id, recipe_id, user_id, body, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (f"c-{uuid.uuid4().hex[:10]}", recipe_id, user_id, body, now_iso()),
+        )
 
 
 def current_user(data: dict) -> dict | None:
     user_id = session.get("user_id")
-    if not user_id and data["users"]:
-        session["user_id"] = data["users"][0]["id"]
-        user_id = session["user_id"]
-    return next((user for user in data["users"] if user["id"] == user_id), None)
+    user = next((user for user in data["users"] if user["id"] == user_id), None)
+    if user_id and not user:
+        session.pop("user_id", None)
+    return user
+
+
+def profile_ready(user: dict | None) -> bool:
+    return bool(user and user.get("nickname"))
 
 
 def recipe_owner(data: dict, recipe: dict) -> dict:
@@ -478,13 +696,13 @@ TEMPLATE = """
     </section>
 
     <div class="topbar">
-      <a class="profile-chip" href="{{ url_for('profiles') }}">
+      <a class="profile-chip" href="{{ url_for('profile_setup') if user else url_for('signup') }}">
         {% if user and user.avatar %}
           <img class="avatar" src="{{ url_for('static', filename=user.avatar) }}" alt="">
         {% else %}
           <span class="avatar">{{ (user.name[:1] if user else "R") }}</span>
         {% endif %}
-        <span>{{ user.name if user else "Create profile" }}</span>
+        <span>{{ user.name if user and user.nickname else "Sign up" }}</span>
       </a>
       <nav class="nav" aria-label="Primary">
         <a class="nav-chip" href="{{ url_for('index') }}">Cards</a>
@@ -506,7 +724,7 @@ TEMPLATE = """
     <a class="{% if active == 'cards' %}active{% endif %}" href="{{ url_for('index') }}">Cards</a>
     <a class="{% if active == 'new' %}active{% endif %}" href="{{ url_for('new_recipe') }}">Create</a>
     <a class="{% if active == 'inventory' %}active{% endif %}" href="{{ url_for('inventory') }}">Stock</a>
-    <a class="{% if active == 'profile' %}active{% endif %}" href="{{ url_for('profiles') }}">Profile</a>
+    <a class="{% if active == 'profile' %}active{% endif %}" href="{{ url_for('profile_setup') if user else url_for('signup') }}">{{ "Profile" if user and user.nickname else "Sign up" }}</a>
   </nav>
 </body>
 </html>
@@ -546,7 +764,7 @@ INDEX_TEMPLATE = """
           </div>
         </article>
       {% else %}
-        <div class="empty">No recipes yet. Add the first card to the box.</div>
+        <div class="empty">{% if user %}No recipes yet. Add the first card to the box.{% else %}Sign up to start building your recipe box.{% endif %}</div>
       {% endfor %}
     </div>
   </div>
@@ -691,35 +909,63 @@ DETAIL_TEMPLATE = """
 """
 
 
-PROFILE_TEMPLATE = """
+SIGNUP_TEMPLATE = """
 {% extends "base" %}
 {% block content %}
 <section class="workspace">
   <div class="panel">
-    <h2>Create profile</h2>
-    <form method="post" enctype="multipart/form-data">
-      <label>Name
-        <input name="name" required>
+    <h2>Sign up</h2>
+    <form method="post">
+      <input type="hidden" name="mode" value="signup">
+      <label>Email
+        <input type="email" name="email" autocomplete="email" required>
       </label>
-      <label>Location
-        <input name="location" placeholder="City, region">
+      <label>Password
+        <input type="password" name="password" autocomplete="new-password" minlength="8" required>
+      </label>
+      <button type="submit">Create account</button>
+    </form>
+  </div>
+  <div class="panel">
+    <h2>Sign in</h2>
+    <form method="post">
+      <input type="hidden" name="mode" value="login">
+      <label>Email
+        <input type="email" name="email" autocomplete="email" required>
+      </label>
+      <label>Password
+        <input type="password" name="password" autocomplete="current-password" required>
+      </label>
+      <button class="secondary" type="submit">Sign in</button>
+    </form>
+  </div>
+</section>
+{% endblock %}
+"""
+
+
+PROFILE_SETUP_TEMPLATE = """
+{% extends "base" %}
+{% block content %}
+<section class="workspace">
+  <div class="panel">
+    <h2>Set up profile</h2>
+    <form method="post" enctype="multipart/form-data">
+      <label>Profile nickname
+        <input name="nickname" value="{{ user.nickname if user else '' }}" autocomplete="nickname" required>
       </label>
       <label>About
-        <textarea name="bio" placeholder="Favorite cuisines, dietary notes, cooking style"></textarea>
+        <textarea name="bio" placeholder="Favorite cuisines, dietary notes, cooking style">{{ user.bio if user else '' }}</textarea>
       </label>
       <label>Avatar
         <input type="file" name="avatar" accept="image/*">
       </label>
-      <button type="submit">Create profile</button>
+      <button type="submit">Save profile</button>
     </form>
   </div>
   <div class="panel">
-    <h2>Switch cook</h2>
-    {% for profile in users %}
-      <form method="post" action="{{ url_for('switch_profile', user_id=profile.id) }}">
-        <button class="secondary" type="submit">{{ profile.name }}{% if user and profile.id == user.id %} · active{% endif %}</button>
-      </form>
-    {% endfor %}
+    <h2>Account</h2>
+    <p class="small">{{ user.email }}</p>
   </div>
 </section>
 {% endblock %}
@@ -771,7 +1017,8 @@ app.jinja_loader = DictLoader({
     "index": INDEX_TEMPLATE,
     "recipe_form": RECIPE_FORM_TEMPLATE,
     "detail": DETAIL_TEMPLATE,
-    "profiles": PROFILE_TEMPLATE,
+    "signup": SIGNUP_TEMPLATE,
+    "profile_setup": PROFILE_SETUP_TEMPLATE,
     "inventory": INVENTORY_TEMPLATE,
 })
 
@@ -780,6 +1027,10 @@ app.jinja_loader = DictLoader({
 def index():
     data = load_data()
     user = current_user(data)
+    if not user:
+        return redirect(url_for("signup"))
+    if not profile_ready(user):
+        return redirect(url_for("profile_setup"))
     inventory = user.get("inventory", []) if user else []
     recipes = [decorate_recipe(data, recipe, inventory) for recipe in data["recipes"]]
     suggestions = sorted(recipes, key=lambda item: (item["match_count"], item["average_rating"]), reverse=True)[:3]
@@ -793,35 +1044,58 @@ def index():
     )
 
 
-@app.route("/profiles", methods=["GET", "POST"])
-def profiles():
+@app.route("/signup", methods=["GET", "POST"])
+def signup():
     data = load_data()
     user = current_user(data)
-    if request.method == "POST":
-        avatar = save_avatar(request.files.get("avatar"))
-        new_user = {
-            "id": f"u-{uuid.uuid4().hex[:10]}",
-            "name": request.form["name"].strip(),
-            "location": request.form.get("location", "").strip(),
-            "bio": request.form.get("bio", "").strip(),
-            "avatar": avatar,
-            "inventory": [],
-            "created_at": now_iso(),
-        }
-        data["users"].append(new_user)
-        session["user_id"] = new_user["id"]
-        save_data(data)
-        flash("Profile created. Your recipe box is ready.")
+    if profile_ready(user):
         return redirect(url_for("index"))
-    return render_template_string(PROFILE_TEMPLATE, title=APP_TITLE, user=user, users=data["users"], active="profile")
-
-
-@app.route("/profiles/<user_id>/switch", methods=["POST"])
-def switch_profile(user_id):
-    data = load_data()
-    if any(user["id"] == user_id for user in data["users"]):
+    if user:
+        return redirect(url_for("profile_setup"))
+    if request.method == "POST":
+        email = request.form.get("email", "").strip().lower()
+        password = request.form.get("password", "")
+        mode = request.form.get("mode", "signup")
+        if mode == "login":
+            user_id = authenticate_user(email, password)
+            if not user_id:
+                flash("Email or password did not match.", "error")
+                return redirect(url_for("signup"))
+            session["user_id"] = user_id
+            data = load_data()
+            user = current_user(data)
+            return redirect(url_for("index") if profile_ready(user) else url_for("profile_setup"))
+        if len(password) < 8:
+            flash("Password must be at least 8 characters.", "error")
+            return redirect(url_for("signup"))
+        try:
+            user_id = create_account(email, password)
+        except sqlite3.IntegrityError:
+            flash("An account already exists for that email. Sign in instead.", "error")
+            return redirect(url_for("signup"))
         session["user_id"] = user_id
-    return redirect(url_for("index"))
+        flash("Account created. Set up your profile next.")
+        return redirect(url_for("profile_setup"))
+    return render_template_string(SIGNUP_TEMPLATE, title=APP_TITLE, user=user, active="profile")
+
+
+@app.route("/profiles", methods=["GET", "POST"])
+@app.route("/profile/setup", methods=["GET", "POST"])
+def profile_setup():
+    data = load_data()
+    user = current_user(data)
+    if not user:
+        return redirect(url_for("signup"))
+    if request.method == "POST":
+        nickname = request.form.get("nickname", "").strip()
+        if not nickname:
+            flash("Choose a profile nickname.", "error")
+            return redirect(url_for("profile_setup"))
+        avatar = save_avatar(request.files.get("avatar"))
+        update_profile(user["id"], nickname, request.form.get("bio", "").strip(), avatar)
+        flash("Profile saved.")
+        return redirect(url_for("index"))
+    return render_template_string(PROFILE_SETUP_TEMPLATE, title=APP_TITLE, user=user, active="profile")
 
 
 @app.route("/recipes/new", methods=["GET", "POST"])
@@ -830,26 +1104,13 @@ def new_recipe():
     user = current_user(data)
     if not user:
         flash("Create a profile before adding recipes.", "error")
-        return redirect(url_for("profiles"))
+        return redirect(url_for("signup"))
+    if not profile_ready(user):
+        return redirect(url_for("profile_setup"))
     if request.method == "POST":
-        recipe = {
-            "id": f"r-{uuid.uuid4().hex[:10]}",
-            "owner_id": user["id"],
-            "title": request.form["title"].strip(),
-            "summary": request.form["summary"].strip(),
-            "prep_time": request.form["prep_time"].strip(),
-            "servings": request.form["servings"].strip(),
-            "ingredients": split_ingredients(request.form["ingredients"]),
-            "steps": split_lines(request.form["steps"]),
-            "ratings": [],
-            "comments": [],
-            "created_at": now_iso(),
-            "updated_at": now_iso(),
-        }
-        data["recipes"].insert(0, recipe)
-        save_data(data)
+        recipe_id = create_recipe(user["id"], request.form)
         flash("Recipe card added to the box.")
-        return redirect(url_for("recipe_detail", recipe_id=recipe["id"]))
+        return redirect(url_for("recipe_detail", recipe_id=recipe_id))
     return render_template_string(RECIPE_FORM_TEMPLATE, title=APP_TITLE, user=user, recipe=None, active="new")
 
 
@@ -883,18 +1144,7 @@ def edit_recipe(recipe_id):
         flash("Only the recipe owner can edit this card.", "error")
         return redirect(url_for("recipe_detail", recipe_id=recipe_id))
     if request.method == "POST":
-        recipe.update(
-            {
-                "title": request.form["title"].strip(),
-                "summary": request.form["summary"].strip(),
-                "prep_time": request.form["prep_time"].strip(),
-                "servings": request.form["servings"].strip(),
-                "ingredients": split_ingredients(request.form["ingredients"]),
-                "steps": split_lines(request.form["steps"]),
-                "updated_at": now_iso(),
-            }
-        )
-        save_data(data)
+        update_recipe(recipe_id, request.form)
         flash("Recipe card updated.")
         return redirect(url_for("recipe_detail", recipe_id=recipe_id))
     return render_template_string(RECIPE_FORM_TEMPLATE, title=APP_TITLE, user=user, recipe=recipe, active="cards")
@@ -905,13 +1155,13 @@ def rate_recipe(recipe_id):
     data = load_data()
     user = current_user(data)
     if not user:
-        return redirect(url_for("profiles"))
+        return redirect(url_for("signup"))
+    if not profile_ready(user):
+        return redirect(url_for("profile_setup"))
     recipe = next((item for item in data["recipes"] if item["id"] == recipe_id), None)
     if recipe:
         score = max(1, min(5, int(request.form["score"])))
-        recipe["ratings"] = [rating for rating in recipe.get("ratings", []) if rating["user_id"] != user["id"]]
-        recipe["ratings"].append({"user_id": user["id"], "score": score})
-        save_data(data)
+        save_rating(recipe_id, user["id"], score)
         flash("Rating saved.")
     return redirect(url_for("recipe_detail", recipe_id=recipe_id))
 
@@ -921,19 +1171,13 @@ def comment_recipe(recipe_id):
     data = load_data()
     user = current_user(data)
     if not user:
-        return redirect(url_for("profiles"))
+        return redirect(url_for("signup"))
+    if not profile_ready(user):
+        return redirect(url_for("profile_setup"))
     recipe = next((item for item in data["recipes"] if item["id"] == recipe_id), None)
     body = request.form.get("body", "").strip()
     if recipe and body:
-        recipe.setdefault("comments", []).append(
-            {
-                "id": f"c-{uuid.uuid4().hex[:10]}",
-                "user_id": user["id"],
-                "body": body,
-                "created_at": now_iso(),
-            }
-        )
-        save_data(data)
+        create_comment(recipe_id, user["id"], body)
         flash("Comment added.")
     return redirect(url_for("recipe_detail", recipe_id=recipe_id))
 
@@ -943,10 +1187,11 @@ def inventory():
     data = load_data()
     user = current_user(data)
     if not user:
-        return redirect(url_for("profiles"))
+        return redirect(url_for("signup"))
+    if not profile_ready(user):
+        return redirect(url_for("profile_setup"))
     if request.method == "POST":
-        user["inventory"] = split_ingredients(request.form.get("inventory", ""))
-        save_data(data)
+        update_inventory(user["id"], split_ingredients(request.form.get("inventory", "")))
         flash("Food stock updated.")
         return redirect(url_for("inventory"))
     suggestions = [
@@ -964,4 +1209,5 @@ def inventory():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=False, use_reloader=False)
+    port = int(os.environ.get("PORT", "5000"))
+    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
