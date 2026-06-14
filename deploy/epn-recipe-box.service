@@ -1,0 +1,17 @@
+[Unit]
+Description=EPN Recipe Box Flask app
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=pi
+Group=pi
+WorkingDirectory=/home/pi/epn-recipe-box
+EnvironmentFile=/etc/epn-recipe-box.env
+ExecStart=/home/pi/epn-recipe-box/.venv/bin/gunicorn --workers 2 --bind 0.0.0.0:5000 app:app
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+

@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from flask import Flask, flash, redirect, render_template_string, request, session, url_for
+from flask import Flask, flash, redirect, render_template_string, request, send_from_directory, session, url_for
 from jinja2 import DictLoader
 from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.utils import secure_filename
@@ -15,15 +15,17 @@ from werkzeug.utils import secure_filename
 APP_TITLE = "EPN Recipe Box"
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
-UPLOAD_DIR = STATIC_DIR / "uploads"
-DB_FILE = BASE_DIR / "recipe_box.db"
+DATA_DIR = Path(os.environ.get("EPN_DATA_DIR", BASE_DIR / "data"))
+UPLOAD_DIR = DATA_DIR / "uploads"
+DB_FILE = DATA_DIR / "recipe_box.db"
 ALLOWED_IMAGE_EXTENSIONS = {"png", "jpg", "jpeg", "gif", "webp"}
 
 STATIC_DIR.mkdir(exist_ok=True)
-UPLOAD_DIR.mkdir(exist_ok=True)
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 app = Flask(__name__)
-app.secret_key = "replace-this-with-a-random-recipe-box-secret"
+app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 app.config["MAX_CONTENT_LENGTH"] = 8 * 1024 * 1024
 
 
@@ -40,13 +42,42 @@ def split_ingredients(value: str) -> list[str]:
     return [chunk.strip().lower() for chunk in chunks if chunk.strip()]
 
 
-def ingredient_key(value: str) -> str:
+def normalized_ingredient_words(value: str) -> list[str]:
     value = value.lower()
     value = re.sub(r"\b(cups?|tbsp|tablespoons?|tsp|teaspoons?|oz|ounces?|lbs?|pounds?|grams?|g|kg|ml|l)\b", "", value)
     value = re.sub(r"[^a-z0-9 ]+", " ", value)
     value = re.sub(r"\b\d+([./]\d+)?\b", "", value)
-    words = [word for word in value.split() if len(word) > 2]
-    return " ".join(words[-2:]) if words else value.strip()
+    words = []
+    for word in value.split():
+        if len(word) <= 2:
+            continue
+        if word.endswith("ies") and len(word) > 4:
+            word = f"{word[:-3]}y"
+        elif word.endswith("es") and len(word) > 4:
+            word = word[:-2]
+        elif word.endswith("s") and len(word) > 3:
+            word = word[:-1]
+        words.append(word)
+    return words
+
+
+def ingredient_key(value: str) -> str:
+    words = normalized_ingredient_words(value)
+    return " ".join(words[-2:]) if words else value.strip().lower()
+
+
+def ingredient_matches(needed: str, stocked: str) -> bool:
+    needed_words = normalized_ingredient_words(needed)
+    stocked_words = normalized_ingredient_words(stocked)
+    if not needed_words or not stocked_words:
+        return needed.strip().lower() == stocked.strip().lower()
+    needed_set = set(needed_words)
+    stocked_set = set(stocked_words)
+    return needed_set.issubset(stocked_set) or bool(needed_set & stocked_set)
+
+
+def stock_has(needed: str, inventory: list[str]) -> bool:
+    return any(ingredient_matches(needed, stocked) for stocked in inventory)
 
 
 def allowed_image(filename: str) -> bool:
@@ -343,12 +374,242 @@ def average_rating(recipe: dict) -> float:
 
 
 def suggestion_score(recipe: dict, inventory: list[str]) -> tuple[int, int, list[str], list[str]]:
-    inventory_keys = {ingredient_key(item) for item in inventory}
     recipe_keys = {ingredient_key(item) for item in recipe["ingredients"]}
-    matched = sorted(item for item in recipe["ingredients"] if ingredient_key(item) in inventory_keys)
-    missing = sorted(item for item in recipe["ingredients"] if ingredient_key(item) not in inventory_keys)
+    matched = sorted(item for item in recipe["ingredients"] if stock_has(item, inventory))
+    missing = sorted(item for item in recipe["ingredients"] if not stock_has(item, inventory))
     return len(matched), len(recipe_keys), matched, missing
 
+RECIPE_IDEA_PATTERNS = [
+    {
+        "id": "fried-rice",
+        "title": "Stock Pot Fried Rice",
+        "core": ["rice", "egg", "garlic", "soy sauce"],
+        "optional": ["peas", "carrot", "green onion", "onion", "spinach", "chicken"],
+        "prep_time": "20 min",
+        "servings": "2",
+        "summary": "A fast skillet rice bowl built from pantry staples and whatever vegetables are on hand.",
+        "steps": [
+            "Warm a large skillet with a little oil over medium-high heat.",
+            "Cook garlic and any chopped vegetables until fragrant and just tender.",
+            "Add rice and stir until hot, then move it to one side of the pan.",
+            "Scramble the egg in the open space, fold everything together, and season with soy sauce.",
+        ],
+    },
+    {
+        "id": "pantry-pasta",
+        "title": "Pantry Pasta Card",
+        "core": ["pasta", "garlic", "olive oil"],
+        "optional": ["tomatoes", "basil", "spinach", "parmesan", "mushrooms", "chicken"],
+        "prep_time": "25 min",
+        "servings": "2",
+        "summary": "A simple pasta that turns stock ingredients into a glossy weeknight dinner.",
+        "steps": [
+            "Boil pasta in salted water until tender, saving a little cooking water.",
+            "Warm olive oil with garlic in a skillet until fragrant.",
+            "Add any vegetables or protein from your stock and cook until ready.",
+            "Toss in pasta with a splash of cooking water until lightly sauced.",
+        ],
+    },
+    {
+        "id": "egg-scramble",
+        "title": "Recipe Box Scramble",
+        "core": ["egg", "cheese"],
+        "optional": ["spinach", "tomatoes", "onion", "mushrooms", "peppers", "toast"],
+        "prep_time": "15 min",
+        "servings": "1",
+        "summary": "A quick, flexible scramble for using up small amounts of vegetables and cheese.",
+        "steps": [
+            "Whisk eggs with a pinch of salt and pepper.",
+            "Cook any chopped vegetables in a nonstick pan until softened.",
+            "Add eggs and stir gently until softly set.",
+            "Fold in cheese at the end and serve right away.",
+        ],
+    },
+    {
+        "id": "hearty-soup",
+        "title": "Stock Drawer Soup",
+        "core": ["broth", "onion", "carrot"],
+        "optional": ["potatoes", "rice", "pasta", "chicken", "beans", "spinach", "garlic"],
+        "prep_time": "35 min",
+        "servings": "4",
+        "summary": "A cozy soup formula that turns stock vegetables, grains, and protein into dinner.",
+        "steps": [
+            "Cook onion and carrot with a little oil until softened.",
+            "Add broth and any sturdy vegetables, grains, beans, or protein from your stock.",
+            "Simmer until everything is tender.",
+            "Season to taste and finish with any tender greens near the end.",
+        ],
+    },
+    {
+        "id": "taco-bowl",
+        "title": "Build-A-Bowl Supper",
+        "core": ["rice", "beans", "salsa"],
+        "optional": ["cheese", "lettuce", "tomatoes", "corn", "chicken", "avocado", "onion"],
+        "prep_time": "20 min",
+        "servings": "2",
+        "summary": "A hearty bowl assembled from grains, beans, and bright toppings.",
+        "steps": [
+            "Warm rice and beans separately or together in a skillet.",
+            "Stir in salsa and any cooked protein from your stock.",
+            "Spoon into bowls and add any fresh toppings you have.",
+            "Finish with cheese or herbs if available.",
+        ],
+    },
+    {
+        "id": "sheet-pan",
+        "title": "One Pan Roast Card",
+        "core": ["potatoes", "onion", "olive oil"],
+        "optional": ["carrot", "chicken", "sausage", "broccoli", "peppers", "garlic"],
+        "prep_time": "45 min",
+        "servings": "3",
+        "summary": "A hands-off roast that works with sturdy vegetables and a simple oil seasoning.",
+        "steps": [
+            "Heat the oven to 425 F and cut ingredients into bite-size pieces.",
+            "Toss everything with olive oil, salt, pepper, and any seasonings you like.",
+            "Spread on a sheet pan with space between pieces.",
+            "Roast until browned and tender, turning once halfway through.",
+        ],
+    },    {
+        "id": "pantry-pancakes",
+        "title": "One-Ingredient-Away Pancakes",
+        "core": ["flour", "egg", "baking soda", "milk"],
+        "optional": ["butter", "sugar", "salt"],
+        "prep_time": "20 min",
+        "servings": "2",
+        "summary": "A simple breakfast card from baking staples. Add milk and your pantry is nearly there.",
+        "steps": [
+            "Whisk flour, baking soda, a little sugar, and a pinch of salt.",
+            "Beat in egg and milk until just combined.",
+            "Cook small pancakes in butter over medium heat.",
+            "Flip when bubbles form and serve warm.",
+        ],
+    },
+    {
+        "id": "loaded-potatoes",
+        "title": "Loaded Potato Cards",
+        "core": ["potatoes", "butter", "cheese"],
+        "optional": ["bacon", "salt", "eggs", "garlic"],
+        "prep_time": "35 min",
+        "servings": "2",
+        "summary": "Crispy or fluffy potatoes finished with butter, cheese, and savory toppings.",
+        "steps": [
+            "Cook potatoes until tender by baking, boiling, or microwaving.",
+            "Split or smash them and add butter and salt.",
+            "Top with cheese and bacon, then warm until melted.",
+            "Add a fried egg if you want it to eat like a meal.",
+        ],
+    },
+    {
+        "id": "pork-chop-plate",
+        "title": "Pork Chop Supper Card",
+        "core": ["pork chops", "potatoes", "butter", "salt"],
+        "optional": ["garlic", "flour", "bacon"],
+        "prep_time": "35 min",
+        "servings": "2",
+        "summary": "A straightforward dinner plate with seared pork chops and buttery potatoes.",
+        "steps": [
+            "Season pork chops with salt and any spices you like.",
+            "Cook potatoes until tender, then finish with butter.",
+            "Sear pork chops in a hot pan until browned and cooked through.",
+            "Rest the pork briefly before serving with the potatoes.",
+        ],
+    },
+    {
+        "id": "bacon-pasta",
+        "title": "Bacon Pasta Skillet",
+        "core": ["pasta", "bacon", "egg", "cheese"],
+        "optional": ["butter", "garlic", "salt"],
+        "prep_time": "25 min",
+        "servings": "2",
+        "summary": "A creamy-style pasta using bacon, egg, and cheese from your stock.",
+        "steps": [
+            "Boil pasta until tender, saving some pasta water.",
+            "Cook bacon until crisp and keep a little of the rendered fat.",
+            "Whisk egg with cheese in a bowl.",
+            "Toss hot pasta with bacon, then remove from heat and stir in the egg mixture with pasta water until glossy.",
+        ],
+    },
+    {
+        "id": "naan-pizza",
+        "title": "Naan Pizza Card",
+        "core": ["naan bread", "cheese", "tomato sauce"],
+        "optional": ["bacon", "garlic", "pork chops"],
+        "prep_time": "18 min",
+        "servings": "1",
+        "summary": "A fast personal pizza idea. Add tomato sauce and your naan and cheese become dinner.",
+        "steps": [
+            "Heat the oven to 425 F.",
+            "Spread tomato sauce over naan bread.",
+            "Top with cheese and any cooked toppings from your stock.",
+            "Bake until the edges are crisp and the cheese is melted.",
+        ],
+    },
+]
+
+
+def inventory_key_set(inventory: list[str]) -> set[str]:
+    return {ingredient_key(item) for item in inventory}
+
+
+def pattern_matches(pattern: dict, inventory: list[str]) -> dict:
+    matched_core = [item for item in pattern["core"] if stock_has(item, inventory)]
+    missing_core = [item for item in pattern["core"] if not stock_has(item, inventory)]
+    matched_optional = [item for item in pattern["optional"] if stock_has(item, inventory)]
+    ingredients = matched_core + matched_optional
+    return {
+        "matched_core": matched_core,
+        "missing_core": missing_core,
+        "matched_optional": matched_optional,
+        "ingredients": ingredients,
+    }
+
+
+def build_recipe_idea(pattern: dict, matches: dict, missing: list[str], kind: str) -> dict:
+    ingredients = matches["ingredients"] + missing
+    return {
+        "id": pattern["id"],
+        "kind": kind,
+        "title": pattern["title"],
+        "summary": pattern["summary"],
+        "prep_time": pattern["prep_time"],
+        "servings": pattern["servings"],
+        "ingredients": ingredients,
+        "steps": pattern["steps"],
+        "matched": matches["ingredients"],
+        "missing": missing,
+        "match_count": len(matches["ingredients"]),
+        "ingredient_count": len(ingredients),
+    }
+
+
+def generated_recipe_ideas(inventory: list[str]) -> tuple[list[dict], list[dict]]:
+    make_now = []
+    add_one = []
+    if not inventory:
+        return make_now, add_one
+
+    for pattern in RECIPE_IDEA_PATTERNS:
+        matches = pattern_matches(pattern, inventory)
+        if not matches["missing_core"] and matches["ingredients"]:
+            make_now.append(build_recipe_idea(pattern, matches, [], "now"))
+        elif len(matches["missing_core"]) == 1 and matches["matched_core"]:
+            add_one.append(build_recipe_idea(pattern, matches, matches["missing_core"], "one"))
+
+    make_now.sort(key=lambda idea: (idea["match_count"], -idea["ingredient_count"]), reverse=True)
+    add_one.sort(key=lambda idea: (idea["match_count"], -idea["ingredient_count"]), reverse=True)
+    return make_now[:4], add_one[:4]
+
+
+def save_generated_recipe(owner_id: str, idea: dict) -> str:
+    payload = {
+        "title": idea["title"],
+        "summary": idea["summary"],
+        "prep_time": idea["prep_time"],
+        "servings": idea["servings"],
+        "ingredients": "\n".join(idea["ingredients"]),
+        "steps": "\n".join(idea["steps"]),
+    }
+    return create_recipe(owner_id, payload)
 
 def decorate_recipe(data: dict, recipe: dict, inventory: list[str] | None = None) -> dict:
     match_count, ingredient_count, matched, missing = suggestion_score(recipe, inventory or [])
@@ -698,7 +959,7 @@ TEMPLATE = """
     <div class="topbar">
       <a class="profile-chip" href="{{ url_for('profile_setup') if user else url_for('signup') }}">
         {% if user and user.avatar %}
-          <img class="avatar" src="{{ url_for('static', filename=user.avatar) }}" alt="">
+          <img class="avatar" src="{{ url_for('uploaded_file', filename=user.avatar.replace('uploads/', '')) }}" alt="">
         {% else %}
           <span class="avatar">{{ (user.name[:1] if user else "R") }}</span>
         {% endif %}
@@ -708,6 +969,11 @@ TEMPLATE = """
         <a class="nav-chip" href="{{ url_for('index') }}">Cards</a>
         <a class="nav-chip" href="{{ url_for('new_recipe') }}">New recipe</a>
         <a class="nav-chip" href="{{ url_for('inventory') }}">Inventory</a>
+        {% if user %}
+          <form method="post" action="{{ url_for('logout') }}" style="margin:0;">
+            <button class="secondary" type="submit">Logout</button>
+          </form>
+        {% endif %}
       </nav>
     </div>
 
@@ -743,9 +1009,9 @@ INDEX_TEMPLATE = """
           <div class="recipe-head">
             <div>
               <h2>{{ recipe.title }}</h2>
-              <div class="meta">by {{ recipe.owner.name }} · {{ recipe.prep_time }} · {{ recipe.servings }} servings</div>
+              <div class="meta">by {{ recipe.owner.name }} &middot; {{ recipe.prep_time }} &middot; {{ recipe.servings }} servings</div>
             </div>
-            <div class="meta">★ {{ recipe.average_rating or "New" }}{% if recipe.rating_count %} ({{ recipe.rating_count }}){% endif %}</div>
+            <div class="meta">&#9733; {{ recipe.average_rating or "New" }}{% if recipe.rating_count %} ({{ recipe.rating_count }}){% endif %}</div>
           </div>
           <p class="summary">{{ recipe.summary }}</p>
           <div class="tags">
@@ -844,9 +1110,9 @@ DETAIL_TEMPLATE = """
     <div class="recipe-head">
       <div>
         <h2>{{ recipe.title }}</h2>
-        <div class="meta">by {{ recipe.owner.name }} · {{ recipe.prep_time }} · {{ recipe.servings }} servings</div>
+        <div class="meta">by {{ recipe.owner.name }} &middot; {{ recipe.prep_time }} &middot; {{ recipe.servings }} servings</div>
       </div>
-      <div class="meta">★ {{ recipe.average_rating or "New" }}</div>
+      <div class="meta">&#9733; {{ recipe.average_rating or "New" }}</div>
     </div>
     <p class="summary">{{ recipe.summary }}</p>
 
@@ -879,7 +1145,7 @@ DETAIL_TEMPLATE = """
       <form method="post" action="{{ url_for('rate_recipe', recipe_id=recipe.id) }}">
         <div class="rating-row">
           {% for score in range(1, 6) %}
-            <button class="star-button" name="score" value="{{ score }}" title="{{ score }} stars">★</button>
+            <button class="star-button" name="score" value="{{ score }}" title="{{ score }} stars">&#9733;</button>
           {% endfor %}
         </div>
       </form>
@@ -966,6 +1232,9 @@ PROFILE_SETUP_TEMPLATE = """
   <div class="panel">
     <h2>Account</h2>
     <p class="small">{{ user.email }}</p>
+    <form method="post" action="{{ url_for('logout') }}">
+      <button class="secondary" type="submit">Logout</button>
+    </form>
   </div>
 </section>
 {% endblock %}
@@ -986,7 +1255,56 @@ INVENTORY_TEMPLATE = """
     </form>
   </div>
   <div class="recipe-box">
-    <p class="box-label">Suggested cards</p>
+    <p class="box-label">Generated from stock</p>
+    <div class="cards">
+      {% for idea in generated_now %}
+        <article class="recipe-card">
+          <h2>{{ idea.title }}</h2>
+          <div class="meta">Uses {{ idea.match_count }} stocked ingredients &middot; {{ idea.prep_time }}</div>
+          <p class="summary">{{ idea.summary }}</p>
+          <div class="tags">
+            {% for item in idea.matched %}
+              <span class="tag">{{ item }}</span>
+            {% endfor %}
+          </div>
+          <form method="post" action="{{ url_for('save_generated') }}">
+            <input type="hidden" name="idea_id" value="{{ idea.id }}">
+            <input type="hidden" name="kind" value="{{ idea.kind }}">
+            <button type="submit">Save recipe</button>
+          </form>
+        </article>
+      {% else %}
+        <div class="empty">Add more stock items to generate recipes you can make now.</div>
+      {% endfor %}
+    </div>
+
+    <p class="box-label">Add one ingredient</p>
+    <div class="cards">
+      {% for idea in generated_one %}
+        <article class="recipe-card">
+          <h2>{{ idea.title }}</h2>
+          <div class="meta">Add {{ idea.missing[0] }} &middot; {{ idea.prep_time }}</div>
+          <p class="summary">{{ idea.summary }}</p>
+          <div class="tags">
+            {% for item in idea.matched %}
+              <span class="tag">{{ item }}</span>
+            {% endfor %}
+            {% for item in idea.missing %}
+              <span class="tag missing">{{ item }}</span>
+            {% endfor %}
+          </div>
+          <form method="post" action="{{ url_for('save_generated') }}">
+            <input type="hidden" name="idea_id" value="{{ idea.id }}">
+            <input type="hidden" name="kind" value="{{ idea.kind }}">
+            <button class="secondary" type="submit">Save idea</button>
+          </form>
+        </article>
+      {% else %}
+        <div class="empty">No one-ingredient-away ideas yet.</div>
+      {% endfor %}
+    </div>
+
+    <p class="box-label">Saved recipe matches</p>
     <div class="cards">
       {% for recipe in suggestions %}
         <article class="recipe-card">
@@ -1003,7 +1321,7 @@ INVENTORY_TEMPLATE = """
           <a class="button" href="{{ url_for('recipe_detail', recipe_id=recipe.id) }}">Cook this</a>
         </article>
       {% else %}
-        <div class="empty">Add ingredients and recipes to get suggestions.</div>
+        <div class="empty">Saved recipes will appear here after you add cards to the box.</div>
       {% endfor %}
     </div>
   </div>
@@ -1021,6 +1339,11 @@ app.jinja_loader = DictLoader({
     "profile_setup": PROFILE_SETUP_TEMPLATE,
     "inventory": INVENTORY_TEMPLATE,
 })
+
+
+@app.route("/uploads/<path:filename>")
+def uploaded_file(filename):
+    return send_from_directory(UPLOAD_DIR, filename)
 
 
 @app.route("/")
@@ -1077,6 +1400,13 @@ def signup():
         flash("Account created. Set up your profile next.")
         return redirect(url_for("profile_setup"))
     return render_template_string(SIGNUP_TEMPLATE, title=APP_TITLE, user=user, active="profile")
+
+
+@app.route("/logout", methods=["POST"])
+def logout():
+    session.clear()
+    flash("You have been logged out.")
+    return redirect(url_for("signup"))
 
 
 @app.route("/profiles", methods=["GET", "POST"])
@@ -1194,8 +1524,10 @@ def inventory():
         update_inventory(user["id"], split_ingredients(request.form.get("inventory", "")))
         flash("Food stock updated.")
         return redirect(url_for("inventory"))
+    inventory_items = user.get("inventory", [])
+    generated_now, generated_one = generated_recipe_ideas(inventory_items)
     suggestions = [
-        decorate_recipe(data, recipe, user.get("inventory", []))
+        decorate_recipe(data, recipe, inventory_items)
         for recipe in data["recipes"]
     ]
     suggestions = sorted(suggestions, key=lambda item: (item["match_count"], item["average_rating"]), reverse=True)
@@ -1204,10 +1536,33 @@ def inventory():
         title=APP_TITLE,
         user=user,
         suggestions=suggestions,
+        generated_now=generated_now,
+        generated_one=generated_one,
         active="inventory",
     )
 
 
+@app.route("/inventory/generated/save", methods=["POST"])
+def save_generated():
+    data = load_data()
+    user = current_user(data)
+    if not user:
+        return redirect(url_for("signup"))
+    if not profile_ready(user):
+        return redirect(url_for("profile_setup"))
+
+    generated_now, generated_one = generated_recipe_ideas(user.get("inventory", []))
+    candidates = generated_now + generated_one
+    idea_id = request.form.get("idea_id", "")
+    kind = request.form.get("kind", "")
+    idea = next((item for item in candidates if item["id"] == idea_id and item["kind"] == kind), None)
+    if not idea:
+        flash("That generated recipe is no longer available. Update your stock and try again.", "error")
+        return redirect(url_for("inventory"))
+
+    recipe_id = save_generated_recipe(user["id"], idea)
+    flash("Generated recipe saved to your recipe box.")
+    return redirect(url_for("recipe_detail", recipe_id=recipe_id))
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
