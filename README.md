@@ -43,7 +43,7 @@ py -3 -m pip install -r requirements.txt
 From this project folder:
 
 ```powershell
-cd "C:\Users\evile\Documents\epn-recipe-box"
+cd "C:\Users\USERNAME\Documents\epn-recipe-box"
 py -3 app.py
 ```
 
