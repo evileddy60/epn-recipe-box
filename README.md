@@ -14,6 +14,9 @@ EPN Recipe Box is a small Flask web app for creating, sharing, rating, and comme
 - Suggest recipes that need one extra ingredient
 - Local SQLite database storage
 - Manual peer synchronization over a LAN or private network with previewed imports and conflict protection
+- One validated primary image per recipe with safe local storage and optimized display output
+- Versioned JSON recipe export/import with preview, conflict reporting, and explicit keep-both handling
+- User-local favorites and non-destructive archived recipes
 
 ## Project Files
 
@@ -167,7 +170,9 @@ The first synchronization version is a manual, peer-to-peer pull workflow. It us
 4. Preview changes before selecting **Sync now**.
 5. Resolve any conflicts with **Keep local**, **Use remote**, or **Keep both**.
 
-The API exposes authenticated `GET /api/sync/manifest` and `GET /api/sync/recipes/<id>` endpoints. The local UI uses `/api/sync/preview`, `/api/sync/run`, and the conflict-resolution endpoint. Recipe cards carry stable IDs, timestamps, and SHA-256 content checksums. Ratings, comments, accounts, and deletions remain local in this version.
+The API exposes authenticated `GET /api/sync/manifest` and `GET /api/sync/recipes/<id>` endpoints. The local UI uses `/api/sync/preview`, `/api/sync/run`, and the conflict-resolution endpoint. Recipe cards carry stable IDs, timestamps, and SHA-256 content checksums. Recipe image binaries, image filesystem paths, favorites, archive state, ratings, comments, and accounts remain local in this version. Older peers continue to receive the existing recipe payload shape.
+
+Recipe JSON exchange uses the versioned `epn-recipe-box.recipe-exchange` envelope through one-recipe and all-owned export actions plus preview/apply import actions. Image metadata may be included, but image bytes and remote URLs are intentionally excluded.
 
 Treat sync tokens like passwords. Keep the service on a trusted LAN/private network or place it behind HTTPS and an authenticated reverse proxy before exposing it outside the LAN. Tokens are never rendered in the interface or application logs.
 
@@ -187,7 +192,7 @@ Avatar uploads are verified by image content with Pillow, dimension/pixel limits
 
 Startup runs numbered migrations recorded in `schema_version`. Pending migrations are transactional and create a timestamped `recipe_box.db.pre-sync-<UTC>.bak` before changes. Re-running startup is idempotent. See `docs/migrations-and-backups.md` and ADR-0004.
 
-The backup tool operates only on explicit paths and refuses to overwrite a restore target unless `--force` is supplied:
+The backup tool operates only on explicit paths and refuses to overwrite a restore target unless `--force` is supplied. It backs up the SQLite file and, when present, copies the sibling `data/recipe-images/` directory to a `<backup-stem>.recipe-images/` sidecar so recipe image assets restore with the database:
 
 ```bash
 python tools/recipe_box_backup.py backup data/recipe_box.db --directory ~/recipe-box-backups
@@ -243,7 +248,7 @@ Stop the app before backing up to avoid copying the database mid-write:
 sudo systemctl stop epn-recipe-box
 mkdir -p ~/epn-recipe-box-backups
 cp data/recipe_box.db ~/epn-recipe-box-backups/recipe_box-$(date +%Y-%m-%d).db
-tar -czf ~/epn-recipe-box-backups/uploads-$(date +%Y-%m-%d).tar.gz data/uploads
+tar -czf ~/epn-recipe-box-backups/uploads-$(date +%Y-%m-%d).tar.gz data/uploads data/recipe-images
 sudo systemctl start epn-recipe-box
 ```
 

@@ -3,6 +3,7 @@
 {% block content %}
 <section class="workspace">
   <article class="recipe-card">
+    {% if recipe.image_filename %}<img class="recipe-image detail-image" src="{{ url_for('recipe_image', filename=recipe.image_filename) }}" alt="Photo of {{ recipe.title }}">{% else %}<div class="image-fallback" role="img" aria-label="No photo for {{ recipe.title }}">Recipe card</div>{% endif %}
     <div class="recipe-head">
       <div>
         <h2>{{ recipe.title }}</h2>
@@ -28,8 +29,11 @@
     </ol>
 
     <div class="actions">
+      {% if user %}<form method="post" action="{{ url_for('unfavorite_recipe' if recipe.favorite else 'favorite_recipe', recipe_id=recipe.id) }}">{{ csrf_input() }}<button class="secondary" type="submit">{{ '★ Unfavorite' if recipe.favorite else '☆ Favorite' }}</button></form>{% endif %}
       {% if user and recipe.owner_id == user.id %}
         <a class="button secondary" href="{{ url_for('edit_recipe', recipe_id=recipe.id) }}">Edit recipe</a>
+        <a class="button secondary" href="{{ url_for('export_recipe', recipe_id=recipe.id) }}">Export recipe</a>
+        {% if recipe.archived_at %}<form method="post" action="{{ url_for('restore_recipe', recipe_id=recipe.id) }}">{{ csrf_input() }}<button class="green" type="submit">Restore recipe</button></form>{% else %}<form method="post" action="{{ url_for('archive_recipe', recipe_id=recipe.id) }}">{{ csrf_input() }}<button class="secondary" type="submit">Archive recipe</button></form>{% endif %}
       {% endif %}
       <button class="secondary copy-share-link" type="button" data-share-url="{{ recipe.share_url }}">Copy share link</button>
     </div>

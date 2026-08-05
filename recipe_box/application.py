@@ -28,7 +28,9 @@ def create_app() -> Flask:
 
     @application.errorhandler(HTTPException)
     def handle_http_error(error):
-        return error_response(error.code or 500, error.description if error.code in {400, 401, 403, 404, 413, 429} else "The request could not be completed.")
+        return error_response(
+            error.code or 500, error.description if error.code in {400, 401, 403, 404, 413, 429} else "The request could not be completed."
+        )
 
     @application.errorhandler(Exception)
     def handle_unexpected_error(error):

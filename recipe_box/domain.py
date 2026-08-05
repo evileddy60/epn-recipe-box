@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import hashlib
+import io
 import uuid
+from pathlib import Path
 from flask import url_for
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, ImageOps, UnidentifiedImageError
 
 from . import config as _config
 from .config import *
@@ -98,7 +101,8 @@ RECIPE_IDEA_PATTERNS = [
             "Spread on a sheet pan with space between pieces.",
             "Roast until browned and tender, turning once halfway through.",
         ],
-    },    {
+    },
+    {
         "id": "pantry-pancakes",
         "title": "One-Ingredient-Away Pancakes",
         "core": ["flour", "egg", "baking soda", "milk"],
@@ -240,6 +244,7 @@ def save_generated_recipe(owner_id: str, idea: dict) -> str:
     }
     return create_recipe(owner_id, payload)
 
+
 def decorate_recipe(data: dict, recipe: dict, inventory: list[str] | None = None) -> dict:
     match_count, ingredient_count, matched, missing = suggestion_score(recipe, inventory or [])
     decorated = dict(recipe)
@@ -280,3 +285,64 @@ def save_avatar(upload) -> str:
     upload.save(target)
     return f"uploads/{stored_name}"
 
+
+def _recipe_image_bytes(upload) -> bytes:
+    if not upload or not upload.filename:
+        return b""
+    stream = upload.stream
+    stream.seek(0)
+    content = stream.read(MAX_RECIPE_IMAGE_BYTES + 1)
+    if len(content) > MAX_RECIPE_IMAGE_BYTES:
+        raise ValueError("Recipe images must be 4 MB or smaller.")
+    return content
+
+
+def save_recipe_image(upload) -> dict:
+    content = _recipe_image_bytes(upload)
+    if not content:
+        return {}
+    try:
+        with Image.open(io.BytesIO(content)) as source:
+            if source.format not in {"PNG", "JPEG", "GIF", "WEBP"}:
+                raise ValueError("Recipe image must be a PNG, JPEG, GIF, or WebP image.")
+            if (
+                source.width > MAX_RECIPE_IMAGE_DIMENSION
+                or source.height > MAX_RECIPE_IMAGE_DIMENSION
+                or source.width * source.height > MAX_RECIPE_IMAGE_PIXELS
+            ):
+                raise ValueError("Recipe image dimensions are too large.")
+            source.verify()
+        with Image.open(io.BytesIO(content)) as source:
+            image = ImageOps.exif_transpose(source).convert("RGB")
+            image.thumbnail((MAX_RECIPE_IMAGE_DISPLAY_DIMENSION, MAX_RECIPE_IMAGE_DISPLAY_DIMENSION), Image.Resampling.LANCZOS)
+            output = io.BytesIO()
+            image.save(output, format="JPEG", quality=86, optimize=True)
+            normalized = output.getvalue()
+            width, height = image.size
+    except (UnidentifiedImageError, OSError, Image.DecompressionBombError) as exc:
+        raise ValueError("The uploaded recipe image is not a valid image.") from exc
+    _config.RECIPE_IMAGE_DIR.mkdir(parents=True, exist_ok=True)
+    stored_name = f"recipe-image-{uuid.uuid4().hex}.jpg"
+    target = (_config.RECIPE_IMAGE_DIR / stored_name).resolve()
+    if target.parent != _config.RECIPE_IMAGE_DIR.resolve():
+        raise ValueError("Invalid recipe image path.")
+    target.write_bytes(normalized)
+    return {
+        "image_filename": stored_name,
+        "image_media_type": "image/jpeg",
+        "image_width": width,
+        "image_height": height,
+        "image_size": len(normalized),
+        "image_sha256": hashlib.sha256(normalized).hexdigest(),
+    }
+
+
+def remove_recipe_image(filename: str) -> None:
+    if not filename or Path(filename).name != filename:
+        return
+    target = (_config.RECIPE_IMAGE_DIR / filename).resolve()
+    if target.parent == _config.RECIPE_IMAGE_DIR.resolve():
+        try:
+            target.unlink()
+        except FileNotFoundError:
+            pass

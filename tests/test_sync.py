@@ -51,7 +51,9 @@ class SyncContractTests(unittest.TestCase):
         reversed_tags = dict(BASE_RECIPE, tags=list(reversed(BASE_RECIPE["tags"])))
         self.assertEqual(recipe_checksum(BASE_RECIPE), recipe_checksum(reversed_tags))
         self.assertNotEqual(recipe_checksum(BASE_RECIPE), recipe_checksum(dict(BASE_RECIPE, category="breakfast")))
-        self.assertNotEqual(recipe_checksum(BASE_RECIPE), recipe_checksum(dict(BASE_RECIPE, tags=[{"normalized_name": "quick", "display_name": "Quick"}])))
+        self.assertNotEqual(
+            recipe_checksum(BASE_RECIPE), recipe_checksum(dict(BASE_RECIPE, tags=[{"normalized_name": "quick", "display_name": "Quick"}]))
+        )
 
     def test_older_payload_defaults_category_and_tags(self):
         older = dict(BASE_RECIPE)
@@ -71,6 +73,7 @@ class SyncContractTests(unittest.TestCase):
 class SyncApiTests(unittest.TestCase):
     def setUp(self):
         import app as recipe_app
+
         self.recipe_app = recipe_app
         self.tempdir = tempfile.TemporaryDirectory()
         root = Path(self.tempdir.name)
@@ -91,16 +94,51 @@ class SyncApiTests(unittest.TestCase):
         response = self.client.get("/api/sync/manifest")
         self.assertEqual(response.status_code, 401)
         with self.recipe_app.db_connect() as conn:
-            conn.execute("INSERT INTO users (id, email, password_hash, created_at) VALUES (?, ?, ?, ?)", ("u-1", "test@example.com", "unused", self.recipe_app.now_iso()))
-            conn.execute("INSERT INTO recipes (id, owner_id, title, summary, prep_time, servings, ingredients_json, steps_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (BASE_RECIPE["id"], "u-1", BASE_RECIPE["title"], BASE_RECIPE["summary"], BASE_RECIPE["prep_time"], BASE_RECIPE["servings"], json.dumps(BASE_RECIPE["ingredients"]), json.dumps(BASE_RECIPE["steps"]), BASE_RECIPE["created_at"], BASE_RECIPE["updated_at"]))
+            conn.execute(
+                "INSERT INTO users (id, email, password_hash, created_at) VALUES (?, ?, ?, ?)",
+                ("u-1", "test@example.com", "unused", self.recipe_app.now_iso()),
+            )
+            conn.execute(
+                "INSERT INTO recipes (id, owner_id, title, summary, prep_time, servings, ingredients_json, steps_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    BASE_RECIPE["id"],
+                    "u-1",
+                    BASE_RECIPE["title"],
+                    BASE_RECIPE["summary"],
+                    BASE_RECIPE["prep_time"],
+                    BASE_RECIPE["servings"],
+                    json.dumps(BASE_RECIPE["ingredients"]),
+                    json.dumps(BASE_RECIPE["steps"]),
+                    BASE_RECIPE["created_at"],
+                    BASE_RECIPE["updated_at"],
+                ),
+            )
         response = self.client.get("/api/sync/manifest", headers={"Authorization": "Bearer test-sync-token"})
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["recipes"][0]["id"], BASE_RECIPE["id"])
 
     def test_manifest_includes_category_and_tags(self):
         with self.recipe_app.db_connect() as conn:
-            conn.execute("INSERT INTO users (id, email, password_hash, created_at) VALUES (?, ?, ?, ?)", ("u-1", "test@example.com", "unused", self.recipe_app.now_iso()))
-            conn.execute("INSERT INTO recipes (id, owner_id, title, summary, prep_time, servings, ingredients_json, steps_json, category_key, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (BASE_RECIPE["id"], "u-1", BASE_RECIPE["title"], BASE_RECIPE["summary"], BASE_RECIPE["prep_time"], BASE_RECIPE["servings"], json.dumps(BASE_RECIPE["ingredients"]), json.dumps(BASE_RECIPE["steps"]), "dinner", BASE_RECIPE["created_at"], BASE_RECIPE["updated_at"]))
+            conn.execute(
+                "INSERT INTO users (id, email, password_hash, created_at) VALUES (?, ?, ?, ?)",
+                ("u-1", "test@example.com", "unused", self.recipe_app.now_iso()),
+            )
+            conn.execute(
+                "INSERT INTO recipes (id, owner_id, title, summary, prep_time, servings, ingredients_json, steps_json, category_key, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    BASE_RECIPE["id"],
+                    "u-1",
+                    BASE_RECIPE["title"],
+                    BASE_RECIPE["summary"],
+                    BASE_RECIPE["prep_time"],
+                    BASE_RECIPE["servings"],
+                    json.dumps(BASE_RECIPE["ingredients"]),
+                    json.dumps(BASE_RECIPE["steps"]),
+                    "dinner",
+                    BASE_RECIPE["created_at"],
+                    BASE_RECIPE["updated_at"],
+                ),
+            )
             self.recipe_app.replace_recipe_tags(conn, BASE_RECIPE["id"], BASE_RECIPE["tags"])
         response = self.client.get("/api/sync/manifest", headers={"Authorization": "Bearer test-sync-token"})
         payload = response.get_json()["recipes"][0]
@@ -109,8 +147,14 @@ class SyncApiTests(unittest.TestCase):
 
     def test_sync_dashboard_does_not_render_peer_token(self):
         with self.recipe_app.db_connect() as conn:
-            conn.execute("INSERT INTO users (id, email, password_hash, nickname, created_at) VALUES (?, ?, ?, ?, ?)", ("u-1", "test@example.com", "unused", "Tester", self.recipe_app.now_iso()))
-            conn.execute("INSERT INTO sync_peers (id, name, url, token, created_at) VALUES (?, ?, ?, ?, ?)", ("p-1", "Peer", "http://localhost:5001", "do-not-render", self.recipe_app.now_iso()))
+            conn.execute(
+                "INSERT INTO users (id, email, password_hash, nickname, created_at) VALUES (?, ?, ?, ?, ?)",
+                ("u-1", "test@example.com", "unused", "Tester", self.recipe_app.now_iso()),
+            )
+            conn.execute(
+                "INSERT INTO sync_peers (id, name, url, token, created_at) VALUES (?, ?, ?, ?, ?)",
+                ("p-1", "Peer", "http://localhost:5001", "do-not-render", self.recipe_app.now_iso()),
+            )
         with self.client.session_transaction() as session:
             session["user_id"] = "u-1"
         response = self.client.get("/sync")

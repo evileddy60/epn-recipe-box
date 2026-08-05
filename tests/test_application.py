@@ -7,6 +7,7 @@ from pathlib import Path
 
 from PIL import Image
 
+
 class ApplicationFlowTests(unittest.TestCase):
     def setUp(self):
         import app as recipe_app
@@ -14,10 +15,7 @@ class ApplicationFlowTests(unittest.TestCase):
         self.recipe_app = recipe_app
         self.tempdir = __import__("tempfile").TemporaryDirectory()
         root = Path(self.tempdir.name)
-        self.original = {
-            name: getattr(recipe_app, name)
-            for name in ("DATA_DIR", "UPLOAD_DIR", "DB_FILE", "STATIC_DIR")
-        }
+        self.original = {name: getattr(recipe_app, name) for name in ("DATA_DIR", "UPLOAD_DIR", "DB_FILE", "STATIC_DIR")}
         recipe_app.DATA_DIR = root
         recipe_app.UPLOAD_DIR = root / "uploads"
         recipe_app.DB_FILE = root / "recipe_box.db"
@@ -155,15 +153,43 @@ class ApplicationFlowTests(unittest.TestCase):
             "created_at": "2026-01-01T00:00:00+00:00",
             "updated_at": "2026-01-01T01:00:00+00:00",
         }
-        remote = dict(local, title="Remote title", steps=["Cook remotely."], category="dinner", tags=[{"normalized_name": "remote", "display_name": "remote"}], updated_at="2026-01-01T02:00:00+00:00")
+        remote = dict(
+            local,
+            title="Remote title",
+            steps=["Cook remotely."],
+            category="dinner",
+            tags=[{"normalized_name": "remote", "display_name": "remote"}],
+            updated_at="2026-01-01T02:00:00+00:00",
+        )
         with self.recipe_app.db_connect() as conn:
             user_id = conn.execute("SELECT id FROM users LIMIT 1").fetchone()["id"]
-            conn.execute("INSERT INTO sync_peers (id, name, url, token, created_at) VALUES ('peer-test', 'Test peer', 'http://peer.test', 'token', ?)", (self.recipe_app.now_iso(),))
-            conn.execute("INSERT INTO recipes (id, owner_id, title, summary, prep_time, servings, ingredients_json, steps_json, category_key, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (local["id"], user_id, local["title"], local["summary"], local["prep_time"], local["servings"], json.dumps(local["ingredients"]), json.dumps(local["steps"]), local["category"], local["created_at"], local["updated_at"]))
+            conn.execute(
+                "INSERT INTO sync_peers (id, name, url, token, created_at) VALUES ('peer-test', 'Test peer', 'http://peer.test', 'token', ?)",
+                (self.recipe_app.now_iso(),),
+            )
+            conn.execute(
+                "INSERT INTO recipes (id, owner_id, title, summary, prep_time, servings, ingredients_json, steps_json, category_key, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    local["id"],
+                    user_id,
+                    local["title"],
+                    local["summary"],
+                    local["prep_time"],
+                    local["servings"],
+                    json.dumps(local["ingredients"]),
+                    json.dumps(local["steps"]),
+                    local["category"],
+                    local["created_at"],
+                    local["updated_at"],
+                ),
+            )
             self.recipe_app.replace_recipe_tags(conn, local["id"], local["tags"])
             for index, resolution in enumerate(("keep_local", "use_remote", "keep_both")):
                 conflict_id = f"conflict-{index}"
-                conn.execute("INSERT INTO sync_conflicts (id, peer_id, recipe_id, local_json, remote_json, status, created_at) VALUES (?, ?, ?, ?, ?, 'open', ?)", (conflict_id, "peer-test", local["id"], json.dumps(local), json.dumps(remote), self.recipe_app.now_iso()))
+                conn.execute(
+                    "INSERT INTO sync_conflicts (id, peer_id, recipe_id, local_json, remote_json, status, created_at) VALUES (?, ?, ?, ?, ?, 'open', ?)",
+                    (conflict_id, "peer-test", local["id"], json.dumps(local), json.dumps(remote), self.recipe_app.now_iso()),
+                )
                 conn.commit()
                 result = self.recipe_app.resolve_sync_conflict_action(conflict_id, resolution)
                 self.assertEqual(result, {"status": "resolved", "resolution": resolution})
@@ -194,7 +220,13 @@ class ApplicationFlowTests(unittest.TestCase):
         recipe_id = response.location.rsplit("/", 1)[-1]
         with self.recipe_app.db_connect() as conn:
             recipe = conn.execute("SELECT category_key FROM recipes WHERE id = ?", (recipe_id,)).fetchone()
-            tags = [row["normalized_name"] for row in conn.execute("SELECT t.normalized_name FROM tags t JOIN recipe_tags rt ON rt.tag_id = t.id WHERE rt.recipe_id = ? ORDER BY t.normalized_name", (recipe_id,))]
+            tags = [
+                row["normalized_name"]
+                for row in conn.execute(
+                    "SELECT t.normalized_name FROM tags t JOIN recipe_tags rt ON rt.tag_id = t.id WHERE rt.recipe_id = ? ORDER BY t.normalized_name",
+                    (recipe_id,),
+                )
+            ]
         self.assertEqual(recipe["category_key"], "dinner")
         self.assertEqual(tags, ["high-protein", "quick"])
 
@@ -220,7 +252,12 @@ class ApplicationFlowTests(unittest.TestCase):
         self.assertEqual(response.status_code, 302)
         with self.recipe_app.db_connect() as conn:
             recipe = conn.execute("SELECT category_key FROM recipes WHERE id = ?", (recipe_id,)).fetchone()
-            tags = [row["normalized_name"] for row in conn.execute("SELECT t.normalized_name FROM tags t JOIN recipe_tags rt ON rt.tag_id = t.id WHERE rt.recipe_id = ?", (recipe_id,))]
+            tags = [
+                row["normalized_name"]
+                for row in conn.execute(
+                    "SELECT t.normalized_name FROM tags t JOIN recipe_tags rt ON rt.tag_id = t.id WHERE rt.recipe_id = ?", (recipe_id,)
+                )
+            ]
         self.assertEqual(recipe["category_key"], "lunch")
         self.assertEqual(tags, ["family-favorite"])
 
@@ -230,7 +267,21 @@ class ApplicationFlowTests(unittest.TestCase):
             columns = {row["name"] for row in conn.execute("PRAGMA table_info(recipes)")}
             self.assertIn("category_key", columns)
             user_id = conn.execute("SELECT id FROM users LIMIT 1").fetchone()["id"]
-            conn.execute("INSERT INTO recipes (id, owner_id, title, summary, prep_time, servings, ingredients_json, steps_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", ("r-legacy", user_id, "Legacy Soup", "Old card", "20 min", "2", json.dumps(["broth"]), json.dumps(["Cook."]), self.recipe_app.now_iso(), self.recipe_app.now_iso()))
+            conn.execute(
+                "INSERT INTO recipes (id, owner_id, title, summary, prep_time, servings, ingredients_json, steps_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "r-legacy",
+                    user_id,
+                    "Legacy Soup",
+                    "Old card",
+                    "20 min",
+                    "2",
+                    json.dumps(["broth"]),
+                    json.dumps(["Cook."]),
+                    self.recipe_app.now_iso(),
+                    self.recipe_app.now_iso(),
+                ),
+            )
         response = self.client.get("/?q=legacy")
         self.assertIn(b"Legacy Soup", response.data)
         self.assertIn(b"Uncategorized", response.data)
@@ -238,8 +289,13 @@ class ApplicationFlowTests(unittest.TestCase):
     def test_tag_limits_and_invalid_category_are_rejected(self):
         self.signup_and_profile()
         base = {
-            "title": "Bounded Recipe", "summary": "A bounded card.", "prep_time": "10 min", "servings": "1",
-            "ingredients": "rice", "steps": "Cook.", "category": "not valid!",
+            "title": "Bounded Recipe",
+            "summary": "A bounded card.",
+            "prep_time": "10 min",
+            "servings": "1",
+            "ingredients": "rice",
+            "steps": "Cook.",
+            "category": "not valid!",
             "tags": "one, two",
         }
         response = self.client.post("/recipes/new", data=base)

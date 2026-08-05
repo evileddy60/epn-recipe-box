@@ -21,8 +21,15 @@ CATEGORY_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
 TAG_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
 MAX_RECIPE_TAGS = 12
 REQUIRED_RECIPE_FIELDS = {
-    "id", "title", "summary", "prep_time", "servings", "ingredients",
-    "steps", "created_at", "updated_at",
+    "id",
+    "title",
+    "summary",
+    "prep_time",
+    "servings",
+    "ingredients",
+    "steps",
+    "created_at",
+    "updated_at",
 }
 
 

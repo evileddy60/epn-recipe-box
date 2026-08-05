@@ -26,6 +26,7 @@
           </select>
         </label>
       </div>
+      <label class="check-row"><input type="checkbox" name="favorites" value="1" {% if filters.favorites %}checked{% endif %}> Favorites only</label>
       <div class="actions">
         <button type="submit">Apply filters</button>
         <a class="button secondary" href="{{ url_for('index') }}">Clear filters</a>
@@ -34,9 +35,17 @@
     {% if filters.q or filters.category or filters.tag %}
       <p class="active-filters" role="status">Active filters: {% if filters.q %}“{{ filters.q }}”{% endif %}{% if filters.category %} · {{ filters.category|replace('-', ' ')|title }}{% endif %}{% if filters.tag %} · #{{ filters.tag }}{% endif %}</p>
     {% endif %}
+    <div class="actions view-switcher">
+      <a class="button secondary" href="{{ url_for('index') }}">Active recipes</a>
+      <a class="button secondary" href="{{ url_for('index', favorites=1) }}">Favorites</a>
+      <a class="button secondary" href="{{ url_for('index', archived=1) }}">Archived</a>
+      <a class="button secondary" href="{{ url_for('export_all_recipes') }}">Export all</a>
+      <a class="button secondary" href="{{ url_for('import_preview') }}">Import</a>
+    </div>
     <div class="cards">
       {% for recipe in recipes %}
         <article class="recipe-card">
+          {% if recipe.image_filename %}<img class="recipe-image" src="{{ url_for('recipe_image', filename=recipe.image_filename) }}" alt="Photo of {{ recipe.title }}" loading="lazy">{% else %}<div class="image-fallback" role="img" aria-label="No photo for {{ recipe.title }}">Recipe card</div>{% endif %}
           <div class="recipe-head">
             <div>
               <h2>{{ recipe.title }}</h2>
@@ -56,8 +65,10 @@
           {% endif %}
           <div class="actions">
             <a class="button" href="{{ url_for('recipe_detail', recipe_id=recipe.id) }}">Open card</a>
+            <form method="post" action="{{ url_for('unfavorite_recipe' if recipe.favorite else 'favorite_recipe', recipe_id=recipe.id) }}">{{ csrf_input() }}<button class="secondary" type="submit" aria-label="{{ 'Unfavorite' if recipe.favorite else 'Favorite' }} {{ recipe.title }}">{{ '★ Unfavorite' if recipe.favorite else '☆ Favorite' }}</button></form>
             {% if user and recipe.owner_id == user.id %}
               <a class="button secondary" href="{{ url_for('edit_recipe', recipe_id=recipe.id) }}">Edit</a>
+              {% if recipe.archived_at %}<form method="post" action="{{ url_for('restore_recipe', recipe_id=recipe.id) }}">{{ csrf_input() }}<button class="green" type="submit">Restore</button></form>{% else %}<form method="post" action="{{ url_for('archive_recipe', recipe_id=recipe.id) }}">{{ csrf_input() }}<button class="secondary" type="submit">Archive</button></form>{% endif %}
             {% endif %}
           </div>
         </article>

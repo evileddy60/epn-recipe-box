@@ -28,9 +28,9 @@ jobs:
       - name: Compile Python
         run: python -m py_compile app.py sync.py recipe_box/*.py tools/*.py tests/*.py
       - name: Ruff lint
-        run: ruff check .
+        run: ruff check app.py recipe_box sync.py tests tools
       - name: Ruff format check
-        run: ruff format --check recipe_box/migrations.py recipe_box/security.py tools/recipe_box_backup.py tests/test_operations.py tests/test_security.py
+        run: ruff format --check app.py recipe_box sync.py tests tools
       - name: Automated tests, migrations, backups, and synchronization contracts
         env:
           EPN_ENV: development

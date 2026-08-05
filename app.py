@@ -17,7 +17,7 @@ import recipe_box.domain as _domain
 
 def _sync_legacy_globals() -> None:
     """Keep legacy app-module path overrides working for callers and tests."""
-    for name in ("DATA_DIR", "UPLOAD_DIR", "DB_FILE", "STATIC_DIR"):
+    for name in ("DATA_DIR", "UPLOAD_DIR", "RECIPE_IMAGE_DIR", "DB_FILE", "STATIC_DIR"):
         value = globals()[name]
         setattr(_config, name, value)
         setattr(_db, name, value)

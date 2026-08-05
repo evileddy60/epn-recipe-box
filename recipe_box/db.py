@@ -337,7 +337,11 @@ def row_to_user(row: sqlite3.Row, inventory: list[str] | None = None) -> dict:
 
 
 def row_to_recipe(
-    row: sqlite3.Row, ratings: list[dict] | None = None, comments: list[dict] | None = None, tags: list[dict] | None = None
+    row: sqlite3.Row,
+    ratings: list[dict] | None = None,
+    comments: list[dict] | None = None,
+    tags: list[dict] | None = None,
+    favorite: bool = False,
 ) -> dict:
     category_key = row["category_key"] if "category_key" in row.keys() else ""
     return {
@@ -357,10 +361,20 @@ def row_to_recipe(
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
         "sync_source_installation_id": row["sync_source_installation_id"] if "sync_source_installation_id" in row.keys() else "",
+        "image_filename": row["image_filename"] if "image_filename" in row.keys() else "",
+        "image_media_type": row["image_media_type"] if "image_media_type" in row.keys() else "",
+        "image_width": row["image_width"] if "image_width" in row.keys() else 0,
+        "image_height": row["image_height"] if "image_height" in row.keys() else 0,
+        "image_size": row["image_size"] if "image_size" in row.keys() else 0,
+        "image_sha256": row["image_sha256"] if "image_sha256" in row.keys() else "",
+        "archived_at": row["archived_at"] if "archived_at" in row.keys() else None,
+        "favorite": favorite,
     }
 
 
-def load_data(search: str = "", category: str = "", tag: str = "") -> dict:
+def load_data(
+    search: str = "", category: str = "", tag: str = "", favorites: bool = False, archived: bool | None = None, user_id: str = ""
+) -> dict:
     init_db()
     search = " ".join((search or "").strip().split())[:120]
     category = normalize_category(category) if category else ""
@@ -389,6 +403,13 @@ def load_data(search: str = "", category: str = "", tag: str = "") -> dict:
         if tag:
             query += " AND EXISTS (SELECT 1 FROM recipe_tags fr_rt JOIN tags fr_t ON fr_t.id = fr_rt.tag_id WHERE fr_rt.recipe_id = r.id AND fr_t.normalized_name = ?)"
             params.append(tag)
+        if archived is True:
+            query += " AND r.archived_at IS NOT NULL"
+        elif archived is False:
+            query += " AND r.archived_at IS NULL"
+        if favorites:
+            query += " AND EXISTS (SELECT 1 FROM favorites f_filter WHERE f_filter.recipe_id = r.id AND f_filter.user_id = ?)"
+            params.append(user_id)
         query += " ORDER BY r.created_at DESC"
         recipe_rows = conn.execute(query, params).fetchall()
         recipe_ids = [row["id"] for row in recipe_rows]
@@ -410,9 +431,16 @@ def load_data(search: str = "", category: str = "", tag: str = "") -> dict:
             comments_by_recipe.setdefault(row["recipe_id"], []).append(
                 {"id": row["id"], "user_id": row["user_id"], "body": row["body"], "created_at": row["created_at"]}
             )
+        favorite_ids = set()
+        if user_id:
+            favorite_ids = {row["recipe_id"] for row in conn.execute("SELECT recipe_id FROM favorites WHERE user_id = ?", (user_id,))}
         recipes = [
             row_to_recipe(
-                row, ratings_by_recipe.get(row["id"], []), comments_by_recipe.get(row["id"], []), tags_by_recipe.get(row["id"], [])
+                row,
+                ratings_by_recipe.get(row["id"], []),
+                comments_by_recipe.get(row["id"], []),
+                tags_by_recipe.get(row["id"], []),
+                row["id"] in favorite_ids,
             )
             for row in recipe_rows
         ]
@@ -423,7 +451,7 @@ def load_data(search: str = "", category: str = "", tag: str = "") -> dict:
         "recipes": recipes,
         "categories": categories,
         "tags": tags,
-        "filters": {"q": search, "category": category, "tag": tag},
+        "filters": {"q": search, "category": category, "tag": tag, "favorites": favorites, "archived": archived},
     }
 
 
@@ -523,7 +551,7 @@ def recipe_tag_payload(conn: sqlite3.Connection, recipe_id: str) -> list[dict]:
     ]
 
 
-def create_recipe(owner_id: str, form) -> str:
+def create_recipe(owner_id: str, form, image_meta: dict | None = None) -> str:
     title = form.get("title", "").strip()
     summary = form.get("summary", "").strip()
     ingredients = form.get("ingredients", "")
@@ -540,9 +568,10 @@ def create_recipe(owner_id: str, form) -> str:
             """
             INSERT INTO recipes (
                 id, owner_id, title, summary, prep_time, servings,
-                ingredients_json, steps_json, category_key, created_at, updated_at
+                ingredients_json, steps_json, category_key, created_at, updated_at,
+                image_filename, image_media_type, image_width, image_height, image_size, image_sha256
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 recipe_id,
@@ -556,13 +585,66 @@ def create_recipe(owner_id: str, form) -> str:
                 category,
                 timestamp,
                 timestamp,
+                (image_meta or {}).get("image_filename", ""),
+                (image_meta or {}).get("image_media_type", ""),
+                (image_meta or {}).get("image_width", 0),
+                (image_meta or {}).get("image_height", 0),
+                (image_meta or {}).get("image_size", 0),
+                (image_meta or {}).get("image_sha256", ""),
             ),
         )
         replace_recipe_tags(conn, recipe_id, form.get("tags", ""))
     return recipe_id
 
 
-def update_recipe(recipe_id: str, form) -> None:
+def insert_imported_recipe(owner_id: str, recipe: dict, source_installation_id: str, recipe_id: str | None = None) -> str:
+    imported_id = recipe_id or recipe["id"]
+    with db_connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO recipes (id, owner_id, title, summary, prep_time, servings, ingredients_json, steps_json, category_key, created_at, updated_at, sync_source_installation_id, image_filename, image_media_type, image_width, image_height, image_size, image_sha256)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', '', 0, 0, 0, '')
+            """,
+            (
+                imported_id,
+                owner_id,
+                recipe["title"],
+                recipe["summary"],
+                recipe["prep_time"],
+                recipe["servings"],
+                json.dumps(recipe["ingredients"]),
+                json.dumps(recipe["steps"]),
+                recipe.get("category", ""),
+                recipe["created_at"],
+                recipe["updated_at"],
+                source_installation_id,
+            ),
+        )
+        replace_recipe_tags(conn, imported_id, recipe.get("tags", []))
+    return imported_id
+
+
+def update_imported_recipe(recipe_id: str, recipe: dict, source_installation_id: str) -> None:
+    with db_connect() as conn:
+        conn.execute(
+            "UPDATE recipes SET title=?, summary=?, prep_time=?, servings=?, ingredients_json=?, steps_json=?, category_key=?, updated_at=?, sync_source_installation_id=? WHERE id=?",
+            (
+                recipe["title"],
+                recipe["summary"],
+                recipe["prep_time"],
+                recipe["servings"],
+                json.dumps(recipe["ingredients"]),
+                json.dumps(recipe["steps"]),
+                recipe.get("category", ""),
+                recipe["updated_at"],
+                source_installation_id,
+                recipe_id,
+            ),
+        )
+        replace_recipe_tags(conn, recipe_id, recipe.get("tags", []))
+
+
+def update_recipe(recipe_id: str, form, image_meta: dict | None = None) -> None:
     title = form.get("title", "").strip()
     summary = form.get("summary", "").strip()
     ingredients = form.get("ingredients", "")
@@ -577,7 +659,10 @@ def update_recipe(recipe_id: str, form) -> None:
             """
             UPDATE recipes
             SET title = ?, summary = ?, prep_time = ?, servings = ?,
-                ingredients_json = ?, steps_json = ?, category_key = ?, updated_at = ?
+                ingredients_json = ?, steps_json = ?, category_key = ?, updated_at = ?,
+                image_filename = COALESCE(?, image_filename), image_media_type = COALESCE(?, image_media_type),
+                image_width = COALESCE(?, image_width), image_height = COALESCE(?, image_height),
+                image_size = COALESCE(?, image_size), image_sha256 = COALESCE(?, image_sha256)
             WHERE id = ?
             """,
             (
@@ -589,10 +674,33 @@ def update_recipe(recipe_id: str, form) -> None:
                 json.dumps(split_lines(form["steps"])),
                 category,
                 now_iso(),
+                (image_meta or {}).get("image_filename"),
+                (image_meta or {}).get("image_media_type"),
+                (image_meta or {}).get("image_width"),
+                (image_meta or {}).get("image_height"),
+                (image_meta or {}).get("image_size"),
+                (image_meta or {}).get("image_sha256"),
                 recipe_id,
             ),
         )
         replace_recipe_tags(conn, recipe_id, form.get("tags", ""))
+
+
+def toggle_favorite(user_id: str, recipe_id: str) -> bool:
+    with db_connect() as conn:
+        existing = conn.execute("SELECT 1 FROM favorites WHERE user_id = ? AND recipe_id = ?", (user_id, recipe_id)).fetchone()
+        if existing:
+            conn.execute("DELETE FROM favorites WHERE user_id = ? AND recipe_id = ?", (user_id, recipe_id))
+            return False
+        conn.execute("INSERT INTO favorites (user_id, recipe_id, created_at) VALUES (?, ?, ?)", (user_id, recipe_id, now_iso()))
+        return True
+
+
+def set_recipe_archived(recipe_id: str, archived: bool) -> None:
+    with db_connect() as conn:
+        conn.execute(
+            "UPDATE recipes SET archived_at = ?, updated_at = ? WHERE id = ?", (now_iso() if archived else None, now_iso(), recipe_id)
+        )
 
 
 def save_rating(recipe_id: str, user_id: str, score: int) -> None:

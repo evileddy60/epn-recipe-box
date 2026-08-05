@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 6
 
 # Compact fixtures represent the three schemas that have existed in the project.
 HISTORICAL_SCHEMAS = {
@@ -116,8 +116,37 @@ def _migration_4(conn: sqlite3.Connection) -> None:
     """)
 
 
+def _migration_5(conn: sqlite3.Connection) -> None:
+    recipe_columns = _columns(conn, "recipes")
+    for column, definition in (
+        ("image_filename", "TEXT NOT NULL DEFAULT ''"),
+        ("image_media_type", "TEXT NOT NULL DEFAULT ''"),
+        ("image_width", "INTEGER NOT NULL DEFAULT 0"),
+        ("image_height", "INTEGER NOT NULL DEFAULT 0"),
+        ("image_size", "INTEGER NOT NULL DEFAULT 0"),
+        ("image_sha256", "TEXT NOT NULL DEFAULT ''"),
+        ("archived_at", "TEXT"),
+    ):
+        if column not in recipe_columns:
+            conn.execute(f"ALTER TABLE recipes ADD COLUMN {column} {definition}")
+
+
+def _migration_6(conn: sqlite3.Connection) -> None:
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS favorites (
+            user_id TEXT NOT NULL,
+            recipe_id TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (user_id, recipe_id),
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+            FOREIGN KEY (recipe_id) REFERENCES recipes(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_favorites_recipe ON favorites(recipe_id);
+    """)
+
+
 def _ordered_migrations() -> tuple[Migration, ...]:
-    return ((1, _migration_1), (2, _migration_2), (3, _migration_3), (4, _migration_4))
+    return ((1, _migration_1), (2, _migration_2), (3, _migration_3), (4, _migration_4), (5, _migration_5), (6, _migration_6))
 
 
 def schema_version(path: Path) -> int:

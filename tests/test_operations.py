@@ -46,16 +46,55 @@ class BackupTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / "source.db"
-            target = root / "restored.db"
+            target = root / "restored" / "restored.db"
             migrations.migrate_database(source)
             with sqlite3.connect(source) as conn:
                 conn.execute("INSERT INTO users (id, email, password_hash, created_at) VALUES ('u1', 'backup@example.com', 'hash', 'now')")
+            (root / "recipe-images").mkdir()
+            (root / "recipe-images" / "recipe-image-test.jpg").write_bytes(b"asset")
+            with sqlite3.connect(source) as conn:
+                conn.execute(
+                    "INSERT INTO recipes (id, owner_id, title, summary, prep_time, servings, ingredients_json, steps_json, created_at, updated_at, image_filename, image_media_type, image_size, image_sha256) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    ("r-image", "u1", "Image", "", "", "", "[]", "[]", "now", "now", "recipe-image-test.jpg", "image/jpeg", 5, ""),
+                )
             backup = backup_database(source, root / "backups")
             self.assertEqual(verify_database(backup), "ok")
             result = restore_database(backup, target)
             self.assertEqual(result["schema_version"], migrations.schema_version(source))
             self.assertEqual(result["row_counts"]["users"], 1)
+            self.assertEqual((root / "restored" / "recipe-images" / "recipe-image-test.jpg").read_bytes(), b"asset")
             with self.assertRaises(FileExistsError):
+                restore_database(backup, target)
+
+    def test_restore_reports_missing_recipe_image_sidecars(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.db"
+            target = root / "restored" / "restored.db"
+            migrations.migrate_database(source)
+            with sqlite3.connect(source) as conn:
+                conn.execute("INSERT INTO users (id, email, password_hash, created_at) VALUES ('u1', 'image@example.com', 'hash', 'now')")
+                conn.execute(
+                    "INSERT INTO recipes (id, owner_id, title, summary, prep_time, servings, ingredients_json, steps_json, created_at, updated_at, image_filename, image_media_type, image_size, image_sha256) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    ("r-image", "u1", "Image", "", "", "", "[]", "[]", "now", "now", "missing.jpg", "image/jpeg", 5, ""),
+                )
+            (root / "recipe-images").mkdir()
+            backup = backup_database(source, root / "backups")
+            result = restore_database(backup, target)
+            self.assertEqual(result["missing_image_sidecars"], ["missing.jpg"])
+
+    def test_restore_rejects_tampered_recipe_image_sidecar(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.db"
+            target = root / "restored.db"
+            migrations.migrate_database(source)
+            (root / "recipe-images").mkdir()
+            (root / "recipe-images" / "photo.jpg").write_bytes(b"original")
+            backup = backup_database(source, root / "backups")
+            sidecar = backup.parent / f"{backup.stem}.recipe-images"
+            (sidecar / "photo.jpg").write_bytes(b"tampered")
+            with self.assertRaisesRegex(RuntimeError, "integrity"):
                 restore_database(backup, target)
 
 
