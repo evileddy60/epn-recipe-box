@@ -1,0 +1,32 @@
+
+{% extends "base.html" %}
+{% block content %}
+<section class="workspace">
+  <div class="panel">
+    <h2>Sign up</h2>
+    <form method="post">
+      <input type="hidden" name="mode" value="signup">
+      <label>Email
+        <input type="email" name="email" autocomplete="email" required>
+      </label>
+      <label>Password
+        <input type="password" name="password" autocomplete="new-password" minlength="8" required>
+      </label>
+      <button type="submit">Create account</button>
+    </form>
+  </div>
+  <div class="panel">
+    <h2>Sign in</h2>
+    <form method="post">
+      <input type="hidden" name="mode" value="login">
+      <label>Email
+        <input type="email" name="email" autocomplete="email" required>
+      </label>
+      <label>Password
+        <input type="password" name="password" autocomplete="current-password" required>
+      </label>
+      <button class="secondary" type="submit">Sign in</button>
+    </form>
+  </div>
+</section>
+{% endblock %}

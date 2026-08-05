@@ -1,0 +1,43 @@
+
+{% extends "base.html" %}
+{% block content %}
+<section class="sync-dashboard" aria-labelledby="sync-title">
+  <div class="panel">
+    <p class="eyebrow">Connected kitchens</p>
+    <h2 id="sync-title">Recipe Box sync</h2>
+    <p class="summary">Connect another Recipe Box on your LAN or private network. Sync is manual, previewed, and never deletes local cards.</p>
+    <div class="status-note" role="note">Your sync token stays outside the interface. Share it only with a trusted Recipe Box operator.</div>
+  </div>
+  <div class="panel">
+    <h3>Add a trusted peer</h3>
+    <form method="post" action="{{ url_for('add_sync_peer') }}">
+      <label>Peer name<input name="name" required maxlength="80" placeholder="Kitchen Pi"></label>
+      <label>Peer URL<input name="url" type="url" required maxlength="500" placeholder="http://kitchen-pi:5000"></label>
+      <label>Shared token<input name="token" type="password" required maxlength="500" autocomplete="new-password"></label>
+      <button type="submit">Add peer</button>
+    </form>
+  </div>
+  <div class="sync-grid">
+    <div>
+      <h3>Connected Recipe Boxes</h3>
+      {% for peer in peers %}
+      <article class="peer-card">
+        <div class="recipe-head"><div><h3>{{ peer.name }}</h3><p class="small">{{ peer.url }}</p></div><span class="status-badge {{ 'ok' if peer.enabled else 'muted' }}">{{ 'Enabled' if peer.enabled else 'Disabled' }}</span></div>
+        <p class="small">Last sync: {{ peer.last_sync_at or 'Not yet synced' }}</p>
+        <div class="actions">
+          <form method="post" action="{{ url_for('preview_sync_peer', peer_id=peer.id) }}"><button class="secondary" type="submit">Preview changes</button></form>
+          <form method="post" action="{{ url_for('run_sync_peer', peer_id=peer.id) }}"><button class="green" type="submit">Sync now</button></form>
+          <form method="post" action="{{ url_for('toggle_sync_peer', peer_id=peer.id) }}"><button class="secondary" type="submit">{{ 'Disable' if peer.enabled else 'Enable' }}</button></form>
+          <form method="post" action="{{ url_for('delete_sync_peer', peer_id=peer.id) }}"><button class="secondary" type="submit">Remove</button></form>
+        </div>
+      </article>
+      {% else %}<div class="empty">No peers yet. Add another trusted Recipe Box to begin.</div>{% endfor %}
+    </div>
+    <aside>
+      <section class="panel"><h3>Recent synchronization</h3>{% for item in history %}<p class="small"><strong>{{ item.status }}</strong> · {{ item.started_at }}<br>{{ item.summary_label }}</p>{% else %}<p class="small">Sync results will appear here.</p>{% endfor %}</section>
+      {% if preview %}<section class="panel" aria-labelledby="preview-title"><h3 id="preview-title">Preview: {{ preview.peer_name }}</h3><p class="small">New {{ preview.counts.new }} · Updated {{ preview.counts.update }} · Unchanged {{ preview.counts.unchanged }} · Conflicts {{ preview.counts.conflict }} · Failures {{ preview.counts.failure }}</p>{% for item in preview.items %}<div class="preview-row"><strong>{{ item.status }}</strong> · {{ item.recipe.title }}</div>{% endfor %}</section>{% endif %}
+      {% if conflicts %}<section class="panel" aria-labelledby="conflict-title"><h3 id="conflict-title">Conflicts needing a decision</h3>{% for conflict in conflicts %}<div class="conflict-row"><strong>{{ conflict.recipe_id }}</strong><div class="actions"><form method="post" action="{{ url_for('resolve_sync_conflict', conflict_id=conflict.id) }}"><input type="hidden" name="resolution" value="keep_local"><button class="secondary" type="submit">Keep local</button></form><form method="post" action="{{ url_for('resolve_sync_conflict', conflict_id=conflict.id) }}"><input type="hidden" name="resolution" value="use_remote"><button type="submit">Use remote</button></form><form method="post" action="{{ url_for('resolve_sync_conflict', conflict_id=conflict.id) }}"><input type="hidden" name="resolution" value="keep_both"><button class="green" type="submit">Keep both</button></form></div></div>{% endfor %}</section>{% endif %}
+    </aside>
+  </div>
+</section>
+{% endblock %}

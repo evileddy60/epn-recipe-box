@@ -1,0 +1,33 @@
+
+{% extends "base.html" %}
+{% block content %}
+<section class="panel">
+  <h2>{{ "Edit recipe" if recipe else "Create a recipe card" }}</h2>
+  <form method="post">
+    <label>Recipe name
+      <input name="title" value="{{ recipe.title if recipe else '' }}" required>
+    </label>
+    <label>Short note
+      <textarea name="summary" required>{{ recipe.summary if recipe else '' }}</textarea>
+    </label>
+    <div class="two">
+      <label>Prep time
+        <input name="prep_time" value="{{ recipe.prep_time if recipe else '' }}" placeholder="35 min" required>
+      </label>
+      <label>Servings
+        <input name="servings" value="{{ recipe.servings if recipe else '' }}" placeholder="4" required>
+      </label>
+    </div>
+    <label>Ingredients
+      <textarea name="ingredients" placeholder="One per line or comma separated" required>{{ recipe.ingredients|join('\n') if recipe else '' }}</textarea>
+    </label>
+    <label>Steps
+      <textarea name="steps" placeholder="One step per line" required>{{ recipe.steps|join('\n') if recipe else '' }}</textarea>
+    </label>
+    <div class="actions">
+      <button type="submit">{{ "Save changes" if recipe else "Add to box" }}</button>
+      <a class="button secondary" href="{{ url_for('index') }}">Cancel</a>
+    </div>
+  </form>
+</section>
+{% endblock %}

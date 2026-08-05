@@ -1,0 +1,66 @@
+
+{% extends "base.html" %}
+{% block content %}
+<section class="workspace">
+  <div class="recipe-box">
+    <p class="box-label">Shared cards</p>
+    <div class="cards">
+      {% for recipe in recipes %}
+        <article class="recipe-card">
+          <div class="recipe-head">
+            <div>
+              <h2>{{ recipe.title }}</h2>
+              <div class="meta">by {{ recipe.owner.name }} &middot; {{ recipe.prep_time }} &middot; {{ recipe.servings }} servings</div>
+            </div>
+            <div class="meta">&#9733; {{ recipe.average_rating or "New" }}{% if recipe.rating_count %} ({{ recipe.rating_count }}){% endif %}</div>
+          </div>
+          <p class="summary">{{ recipe.summary }}</p>
+          <div class="tags">
+            {% for item in recipe.ingredients[:5] %}
+              <span class="tag">{{ item }}</span>
+            {% endfor %}
+          </div>
+          {% if recipe.match_count %}
+            <div class="small">{{ recipe.match_count }} of {{ recipe.ingredient_count }} ingredients in stock</div>
+          {% endif %}
+          <div class="actions">
+            <a class="button" href="{{ url_for('recipe_detail', recipe_id=recipe.id) }}">Open card</a>
+            {% if user and recipe.owner_id == user.id %}
+              <a class="button secondary" href="{{ url_for('edit_recipe', recipe_id=recipe.id) }}">Edit</a>
+            {% endif %}
+          </div>
+        </article>
+      {% else %}
+        <div class="empty">{% if user %}No recipes yet. Add the first card to the box.{% else %}Sign up to start building your recipe box.{% endif %}</div>
+      {% endfor %}
+    </div>
+  </div>
+
+  <aside>
+    <section class="panel">
+      <h3>Your food stock</h3>
+      {% if user.inventory %}
+        <div class="tags">
+          {% for item in user.inventory %}
+            <span class="tag">{{ item }}</span>
+          {% endfor %}
+        </div>
+      {% else %}
+        <p class="small">Add ingredients to unlock recipe suggestions.</p>
+      {% endif %}
+      <div class="actions">
+        <a class="button green" href="{{ url_for('inventory') }}">Update stock</a>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h3>Best matches</h3>
+      {% for recipe in suggestions %}
+        <p><strong>{{ recipe.title }}</strong><br><span class="small">{{ recipe.match_count }} of {{ recipe.ingredient_count }} matched</span></p>
+      {% else %}
+        <p class="small">Add stock items and recipes will sort themselves into place.</p>
+      {% endfor %}
+    </section>
+  </aside>
+</section>
+{% endblock %}

@@ -1,0 +1,56 @@
+
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ title }}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <main class="shell">
+    <section class="hero">
+      <h1>EPN Recipe Box</h1>
+      <p>Create, share, rate, and remix recipes from the food you already have.</p>
+    </section>
+
+    <div class="topbar">
+      <a class="profile-chip" href="{{ url_for('profile_setup') if user else url_for('signup') }}">
+        {% if user and user.avatar %}
+          <img class="avatar" src="{{ url_for('uploaded_file', filename=user.avatar.replace('uploads/', '')) }}" alt="">
+        {% else %}
+          <span class="avatar">{{ (user.name[:1] if user else "R") }}</span>
+        {% endif %}
+        <span>{{ user.name if user and user.nickname else "Sign up" }}</span>
+      </a>
+      <nav class="nav" aria-label="Primary">
+        <a class="nav-chip" href="{{ url_for('index') }}">Cards</a>
+        <a class="nav-chip" href="{{ url_for('new_recipe') }}">New recipe</a>
+        <a class="nav-chip" href="{{ url_for('inventory') }}">Inventory</a>
+        <a class="nav-chip" href="{{ url_for('sync_dashboard') }}">Sync</a>
+        {% if user %}
+          <form method="post" action="{{ url_for('logout') }}" style="margin:0;">
+            <button class="secondary" type="submit">Logout</button>
+          </form>
+        {% endif %}
+      </nav>
+    </div>
+
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% for category, message in messages %}
+        <div class="flash {% if category == 'error' %}error{% endif %}">{{ message }}</div>
+      {% endfor %}
+    {% endwith %}
+
+    {% block content %}{% endblock %}
+  </main>
+
+  <nav class="bottom-nav" aria-label="Mobile primary">
+    <a class="{% if active == 'cards' %}active{% endif %}" href="{{ url_for('index') }}">Cards</a>
+    <a class="{% if active == 'new' %}active{% endif %}" href="{{ url_for('new_recipe') }}">Create</a>
+    <a class="{% if active == 'inventory' %}active{% endif %}" href="{{ url_for('inventory') }}">Stock</a>
+    <a class="{% if active == 'sync' %}active{% endif %}" href="{{ url_for('sync_dashboard') }}">Sync</a>
+    <a class="{% if active == 'profile' %}active{% endif %}" href="{{ url_for('profile_setup') if user else url_for('signup') }}">{{ "Profile" if user and user.nickname else "Sign up" }}</a>
+  </nav>
+</body>
+</html>

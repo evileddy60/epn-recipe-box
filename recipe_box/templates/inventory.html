@@ -1,0 +1,86 @@
+
+{% extends "base.html" %}
+{% block content %}
+<section class="workspace">
+  <div class="panel">
+    <h2>Food stock inventory</h2>
+    <form method="post">
+      <label>Ingredients you have
+        <textarea name="inventory" placeholder="eggs, rice, spinach">{{ user.inventory|join('\n') }}</textarea>
+      </label>
+      <button class="green" type="submit">Update stock</button>
+    </form>
+  </div>
+  <div class="recipe-box">
+    <p class="box-label">Generated from stock</p>
+    <div class="cards">
+      {% for idea in generated_now %}
+        <article class="recipe-card">
+          <h2>{{ idea.title }}</h2>
+          <div class="meta">Uses {{ idea.match_count }} stocked ingredients &middot; {{ idea.prep_time }}</div>
+          <p class="summary">{{ idea.summary }}</p>
+          <div class="tags">
+            {% for item in idea.matched %}
+              <span class="tag">{{ item }}</span>
+            {% endfor %}
+          </div>
+          <form method="post" action="{{ url_for('save_generated') }}">
+            <input type="hidden" name="idea_id" value="{{ idea.id }}">
+            <input type="hidden" name="kind" value="{{ idea.kind }}">
+            <button type="submit">Save recipe</button>
+          </form>
+        </article>
+      {% else %}
+        <div class="empty">Add more stock items to generate recipes you can make now.</div>
+      {% endfor %}
+    </div>
+
+    <p class="box-label">Add one ingredient</p>
+    <div class="cards">
+      {% for idea in generated_one %}
+        <article class="recipe-card">
+          <h2>{{ idea.title }}</h2>
+          <div class="meta">Add {{ idea.missing[0] }} &middot; {{ idea.prep_time }}</div>
+          <p class="summary">{{ idea.summary }}</p>
+          <div class="tags">
+            {% for item in idea.matched %}
+              <span class="tag">{{ item }}</span>
+            {% endfor %}
+            {% for item in idea.missing %}
+              <span class="tag missing">{{ item }}</span>
+            {% endfor %}
+          </div>
+          <form method="post" action="{{ url_for('save_generated') }}">
+            <input type="hidden" name="idea_id" value="{{ idea.id }}">
+            <input type="hidden" name="kind" value="{{ idea.kind }}">
+            <button class="secondary" type="submit">Save idea</button>
+          </form>
+        </article>
+      {% else %}
+        <div class="empty">No one-ingredient-away ideas yet.</div>
+      {% endfor %}
+    </div>
+
+    <p class="box-label">Saved recipe matches</p>
+    <div class="cards">
+      {% for recipe in suggestions %}
+        <article class="recipe-card">
+          <h2>{{ recipe.title }}</h2>
+          <div class="meta">{{ recipe.match_count }} of {{ recipe.ingredient_count }} ingredients ready</div>
+          <div class="tags">
+            {% for item in recipe.matched %}
+              <span class="tag">{{ item }}</span>
+            {% endfor %}
+            {% for item in recipe.missing[:4] %}
+              <span class="tag missing">{{ item }}</span>
+            {% endfor %}
+          </div>
+          <a class="button" href="{{ url_for('recipe_detail', recipe_id=recipe.id) }}">Cook this</a>
+        </article>
+      {% else %}
+        <div class="empty">Saved recipes will appear here after you add cards to the box.</div>
+      {% endfor %}
+    </div>
+  </div>
+</section>
+{% endblock %}
