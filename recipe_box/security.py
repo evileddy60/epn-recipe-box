@@ -37,6 +37,7 @@ def validate_csrf() -> None:
     if (
         not current_app.config.get("ENFORCE_CSRF", True)
         or request.method not in {"POST", "PUT", "PATCH", "DELETE"}
+        or request.path.startswith("/api/v1/")
         or _is_bearer_sync_request()
     ):
         return

@@ -1,0 +1,286 @@
+openapi: 3.0.3
+info:
+  title: EPN Recipe Box API
+  version: 1.0.0
+  description: Versioned private API for invited EPN Recipe Box clients.
+servers:
+  - url: https://{tailscale_host}/api/v1
+    variables:
+      tailscale_host:
+        default: recipe-box.example.ts.net
+paths:
+  /health:
+    get:
+      summary: Public liveness and readiness
+      responses:
+        '200':
+          description: Healthy server
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Health' }
+  /auth/login:
+    post:
+      summary: Authenticate an individual Recipe Box account
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+      responses:
+        '200':
+          description: API token issued
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LoginResponse' }
+        '401': { $ref: '#/components/responses/AuthFailed' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+  /auth/logout:
+    post:
+      summary: Revoke the current API token
+      security: [{ bearerAuth: [] }]
+      responses:
+        '204': { description: Token revoked }
+        '401': { $ref: '#/components/responses/AuthRequired' }
+  /me:
+    get:
+      summary: Return the authenticated user
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: User profile
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+        '401': { $ref: '#/components/responses/AuthRequired' }
+  /recipes:
+    get:
+      summary: List recipes
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/Page' }
+        - { $ref: '#/components/parameters/PageSize' }
+        - { $ref: '#/components/parameters/Search' }
+        - { $ref: '#/components/parameters/Category' }
+        - { $ref: '#/components/parameters/Tag' }
+      responses:
+        '200':
+          description: Paginated recipes
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RecipePage' }
+        '401': { $ref: '#/components/responses/AuthRequired' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+    post:
+      summary: Create a recipe without an image upload
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateRecipeRequest' }
+      responses:
+        '201':
+          description: Created recipe
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Recipe' }
+        '401': { $ref: '#/components/responses/AuthRequired' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+  /recipes/{recipe_id}:
+    get:
+      summary: Get one recipe
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/RecipeId' }]
+      responses:
+        '200':
+          description: Recipe
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Recipe' }
+        '401': { $ref: '#/components/responses/AuthRequired' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /recipes/{recipe_id}/image:
+    get:
+      summary: Get a recipe image through the authenticated API
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/RecipeId' }]
+      responses:
+        '200': { description: Recipe image }
+        '401': { $ref: '#/components/responses/AuthRequired' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /categories:
+    get:
+      summary: List recipe categories
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Categories
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/TaxonomyItem' } }
+        '401': { $ref: '#/components/responses/AuthRequired' }
+  /tags:
+    get:
+      summary: List known recipe tags
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Tags
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/TaxonomyItem' } }
+        '401': { $ref: '#/components/responses/AuthRequired' }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
+  parameters:
+    RecipeId:
+      name: recipe_id
+      in: path
+      required: true
+      schema: { type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$' }
+    Page:
+      name: page
+      in: query
+      schema: { type: integer, minimum: 1, default: 1 }
+    PageSize:
+      name: page_size
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 50, default: 20 }
+    Search:
+      name: q
+      in: query
+      schema: { type: string, maxLength: 200 }
+    Category:
+      name: category
+      in: query
+      schema: { type: string, pattern: '^[a-z0-9][a-z0-9-]{0,39}$' }
+    Tag:
+      name: tag
+      in: query
+      schema: { type: string, pattern: '^[a-z0-9][a-z0-9-]{0,39}$' }
+  responses:
+    AuthRequired:
+      description: Authentication required or token invalid
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    AuthFailed:
+      description: Generic authentication failure
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    RateLimited:
+      description: Login rate limit exceeded
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    ValidationError:
+      description: Request validation failed
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    NotFound:
+      description: Resource not found
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string }
+            message: { type: string }
+            details: { type: object, additionalProperties: true }
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string, format: email, maxLength: 254 }
+        password: { type: string, format: password, maxLength: 128 }
+    LoginResponse:
+      type: object
+      required: [token, token_type, expires_at, user]
+      properties:
+        token: { type: string }
+        token_type: { type: string, enum: [Bearer] }
+        expires_at: { type: string, format: date-time }
+        user: { $ref: '#/components/schemas/User' }
+    User:
+      type: object
+      required: [id, email, nickname, bio]
+      properties:
+        id: { type: string }
+        email: { type: string, format: email }
+        nickname: { type: string }
+        bio: { type: string }
+    CreateRecipeRequest:
+      type: object
+      required: [title, summary, ingredients, steps, category, tags]
+      properties:
+        title: { type: string, maxLength: 200 }
+        summary: { type: string, maxLength: 1000 }
+        prep_time: { type: string, maxLength: 200 }
+        servings: { type: string, maxLength: 200 }
+        ingredients: { type: array, maxItems: 500, items: { type: string, minLength: 1, maxLength: 2000 } }
+        steps: { type: array, maxItems: 500, items: { type: string, minLength: 1, maxLength: 2000 } }
+        category: { type: string, maxLength: 40 }
+        tags: { type: array, maxItems: 12, items: { type: string, minLength: 1, maxLength: 40 } }
+    Recipe:
+      type: object
+      required: [id, title, summary, prep_time, servings, ingredients, steps, category, tags, image, creator, created_at, updated_at]
+      properties:
+        id: { type: string }
+        title: { type: string }
+        summary: { type: string }
+        prep_time: { type: string }
+        servings: { type: string }
+        ingredients: { type: array, items: { type: string } }
+        steps: { type: array, items: { type: string } }
+        category: { type: string }
+        tags: { type: array, items: { $ref: '#/components/schemas/Tag' } }
+        image: { nullable: true, $ref: '#/components/schemas/Image' }
+        creator: { type: object, properties: { id: { type: string }, nickname: { type: string } } }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    Tag:
+      type: object
+      properties:
+        normalized_name: { type: string }
+        display_name: { type: string }
+    Image:
+      type: object
+      properties:
+        url: { type: string, format: uri-reference }
+        media_type: { type: string }
+        width: { type: integer }
+        height: { type: integer }
+        size: { type: integer }
+    TaxonomyItem:
+      type: object
+      properties:
+        key: { type: string }
+        name: { type: string }
+    RecipePage:
+      type: object
+      properties:
+        data: { type: array, items: { $ref: '#/components/schemas/Recipe' } }
+        pagination:
+          type: object
+          properties:
+            page: { type: integer }
+            page_size: { type: integer }
+            total_items: { type: integer }
+            total_pages: { type: integer }
+    Health:
+      type: object
+      properties:
+        status: { type: string, example: ok }
+        database: { type: string, example: ok }
+        schema_version: { type: integer }
+        api_version: { type: string, example: v1 }

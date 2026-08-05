@@ -4,8 +4,9 @@ import os
 from flask import Flask, render_template
 from werkzeug.exceptions import HTTPException
 
-from .config import APP_TITLE, STATIC_DIR, SYNC_TIMEOUT_SECONDS, https_enabled, runtime_secret_key
+from .config import API_BASE_URL, API_TOKEN_TTL_DAYS, APP_TITLE, STATIC_DIR, SYNC_TIMEOUT_SECONDS, https_enabled, runtime_secret_key
 from .routes import bp
+from .api_v1 import bp as api_v1_bp
 from .security import apply_security_headers, csrf_input, csrf_token, error_response, validate_csrf
 
 
@@ -21,6 +22,8 @@ def create_app() -> Flask:
         PERMANENT_SESSION_LIFETIME=__import__("datetime").timedelta(days=14),
         HTTPS_ENABLED=https_enabled(),
         ENFORCE_CSRF=True,
+        API_BASE_URL=API_BASE_URL,
+        API_TOKEN_TTL_DAYS=API_TOKEN_TTL_DAYS,
     )
     application.context_processor(lambda: {"csrf_token": csrf_token, "csrf_input": csrf_input, "app_title": APP_TITLE})
     application.before_request(validate_csrf)
@@ -38,6 +41,7 @@ def create_app() -> Flask:
         return error_response(500, "The server could not complete the request.")
 
     application.register_blueprint(bp)
+    application.register_blueprint(api_v1_bp)
     # Preserve the pre-refactor endpoint names used by templates, callers, and
     # existing integrations while routes live in a blueprint.
     aliases = set()

@@ -22,6 +22,8 @@ APP_ENV = os.environ.get("EPN_ENV", "development").strip().lower()
 IS_PRODUCTION = APP_ENV in {"production", "prod"}
 HTTPS_ENABLED = os.environ.get("EPN_HTTPS", "0").strip().lower() in {"1", "true", "yes", "on"}
 SECRET_KEY_MIN_LENGTH = 32
+API_TOKEN_TTL_DAYS = int(os.environ.get("API_TOKEN_TTL_DAYS", "30"))
+API_BASE_URL = os.environ.get("EPN_API_BASE_URL", "").strip().rstrip("/")
 DEVELOPMENT_SECRET_FALLBACK = secrets.token_urlsafe(32)
 
 

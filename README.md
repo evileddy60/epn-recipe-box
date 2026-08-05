@@ -146,19 +146,23 @@ sudo systemctl restart epn-recipe-box
 
 ## Tailscale Private Access
 
-Install and connect Tailscale on the Pi and on each invited device. Once connected, users can visit:
+The recommended private deployment binds Gunicorn to `127.0.0.1:5000` and uses Tailscale Serve for HTTPS. Install and connect Tailscale on the Pi and each invited device, then use the Pi's MagicDNS hostname. Do not open router/UFW ports or expose the Flask port publicly. See `docs/v2.1/deployment-plan.md` for the operator-managed steps.
 
-```text
-http://PI_TAILSCALE_IP:5000/
-```
+## Versioned Android API
 
-With MagicDNS enabled, this may also work:
+The additive `/api/v1/` API is for native clients and is separate from browser sessions and peer synchronization. It provides:
 
-```text
-http://raspberrypi:5000/
-```
+- `POST /api/v1/auth/login` and `POST /api/v1/auth/logout`
+- `GET /api/v1/me`
+- Paginated/searchable/filterable `GET /api/v1/recipes`
+- `GET /api/v1/recipes/<id>` and authenticated image delivery
+- `POST /api/v1/recipes`
+- `GET /api/v1/categories` and `GET /api/v1/tags`
+- `GET /api/v1/health`
 
-This keeps the app private to your Tailscale network instead of exposing it publicly.
+Android credentials are individual opaque tokens stored hashed in schema migration 7, with expiry and revocation. They are never interchangeable with `SYNC_TOKEN`. The OpenAPI contract is in `docs/v2.1/openapi.yaml`; the architecture, threat model, Android design, and rollback plan are in `docs/v2.1/`.
+
+The first API slice intentionally excludes deletion, image upload, background synchronization, and public Internet exposure. Configure `EPN_API_BASE_URL` to the canonical HTTPS Tailscale API base URL for deployment documentation and client setup.
 
 ## Synchronize With Another Recipe Box
 

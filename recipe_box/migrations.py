@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 # Compact fixtures represent the three schemas that have existed in the project.
 HISTORICAL_SCHEMAS = {
@@ -145,8 +145,33 @@ def _migration_6(conn: sqlite3.Connection) -> None:
     """)
 
 
+def _migration_7(conn: sqlite3.Connection) -> None:
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS api_tokens (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            token_hash TEXT NOT NULL UNIQUE,
+            expires_at TEXT NOT NULL,
+            revoked_at TEXT,
+            created_at TEXT NOT NULL,
+            last_used_at TEXT,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_api_tokens_user ON api_tokens(user_id);
+        CREATE INDEX IF NOT EXISTS idx_api_tokens_expiry ON api_tokens(expires_at);
+    """)
+
+
 def _ordered_migrations() -> tuple[Migration, ...]:
-    return ((1, _migration_1), (2, _migration_2), (3, _migration_3), (4, _migration_4), (5, _migration_5), (6, _migration_6))
+    return (
+        (1, _migration_1),
+        (2, _migration_2),
+        (3, _migration_3),
+        (4, _migration_4),
+        (5, _migration_5),
+        (6, _migration_6),
+        (7, _migration_7),
+    )
 
 
 def schema_version(path: Path) -> int:
