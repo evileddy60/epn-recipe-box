@@ -145,13 +145,16 @@ class ApplicationFlowTests(unittest.TestCase):
             "servings": "1",
             "ingredients": ["rice"],
             "steps": ["Cook locally."],
+            "category": "lunch",
+            "tags": [{"normalized_name": "local", "display_name": "local"}],
             "created_at": "2026-01-01T00:00:00+00:00",
             "updated_at": "2026-01-01T01:00:00+00:00",
         }
-        remote = dict(local, title="Remote title", steps=["Cook remotely."], updated_at="2026-01-01T02:00:00+00:00")
+        remote = dict(local, title="Remote title", steps=["Cook remotely."], category="dinner", tags=[{"normalized_name": "remote", "display_name": "remote"}], updated_at="2026-01-01T02:00:00+00:00")
         with self.recipe_app.db_connect() as conn:
             user_id = conn.execute("SELECT id FROM users LIMIT 1").fetchone()["id"]
-            conn.execute("INSERT INTO recipes (id, owner_id, title, summary, prep_time, servings, ingredients_json, steps_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (local["id"], user_id, local["title"], local["summary"], local["prep_time"], local["servings"], json.dumps(local["ingredients"]), json.dumps(local["steps"]), local["created_at"], local["updated_at"]))
+            conn.execute("INSERT INTO recipes (id, owner_id, title, summary, prep_time, servings, ingredients_json, steps_json, category_key, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (local["id"], user_id, local["title"], local["summary"], local["prep_time"], local["servings"], json.dumps(local["ingredients"]), json.dumps(local["steps"]), local["category"], local["created_at"], local["updated_at"]))
+            self.recipe_app.replace_recipe_tags(conn, local["id"], local["tags"])
             for index, resolution in enumerate(("keep_local", "use_remote", "keep_both")):
                 conflict_id = f"conflict-{index}"
                 conn.execute("INSERT INTO sync_conflicts (id, peer_id, recipe_id, local_json, remote_json, status, created_at) VALUES (?, ?, ?, ?, ?, 'open', ?)", (conflict_id, "peer-test", local["id"], json.dumps(local), json.dumps(remote), self.recipe_app.now_iso()))
@@ -159,8 +162,89 @@ class ApplicationFlowTests(unittest.TestCase):
                 result = self.recipe_app.resolve_sync_conflict_action(conflict_id, resolution)
                 self.assertEqual(result, {"status": "resolved", "resolution": resolution})
             titles = [row["title"] for row in conn.execute("SELECT title FROM recipes ORDER BY id")]
+            categories = [row["category_key"] for row in conn.execute("SELECT category_key FROM recipes ORDER BY id")]
+            all_tags = [row["normalized_name"] for row in conn.execute("SELECT normalized_name FROM tags ORDER BY normalized_name")]
         self.assertIn("Remote title", titles)
+        self.assertIn("dinner", categories)
+        self.assertIn("remote", all_tags)
         self.assertEqual(len(titles), 2)
+
+    def test_recipe_category_tags_search_filters_and_editing(self):
+        self.signup_and_profile()
+        response = self.client.post(
+            "/recipes/new",
+            data={
+                "title": "Spicy Chicken Bowl",
+                "summary": "A quick weeknight dinner.",
+                "prep_time": "25 min",
+                "servings": "2",
+                "ingredients": "chicken\nrice",
+                "steps": "Cook chicken.\nServe.",
+                "category": "dinner",
+                "tags": "Quick,  high-protein, quick",
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+        recipe_id = response.location.rsplit("/", 1)[-1]
+        with self.recipe_app.db_connect() as conn:
+            recipe = conn.execute("SELECT category_key FROM recipes WHERE id = ?", (recipe_id,)).fetchone()
+            tags = [row["normalized_name"] for row in conn.execute("SELECT t.normalized_name FROM tags t JOIN recipe_tags rt ON rt.tag_id = t.id WHERE rt.recipe_id = ? ORDER BY t.normalized_name", (recipe_id,))]
+        self.assertEqual(recipe["category_key"], "dinner")
+        self.assertEqual(tags, ["high-protein", "quick"])
+
+        response = self.client.get("/?q=  CHICKEN  ")
+        self.assertIn(b"Spicy Chicken Bowl", response.data)
+        response = self.client.get("/?category=dinner&tag=quick")
+        self.assertIn(b"Spicy Chicken Bowl", response.data)
+        response = self.client.get("/?q=does-not-exist")
+        self.assertIn(b"No recipes matched", response.data)
+        response = self.client.post(
+            f"/recipes/{recipe_id}/edit",
+            data={
+                "title": "Spicy Chicken Bowl",
+                "summary": "Updated dinner.",
+                "prep_time": "30 min",
+                "servings": "2",
+                "ingredients": "chicken\nrice",
+                "steps": "Cook chicken.\nServe.",
+                "category": "lunch",
+                "tags": "Family favorite",
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+        with self.recipe_app.db_connect() as conn:
+            recipe = conn.execute("SELECT category_key FROM recipes WHERE id = ?", (recipe_id,)).fetchone()
+            tags = [row["normalized_name"] for row in conn.execute("SELECT t.normalized_name FROM tags t JOIN recipe_tags rt ON rt.tag_id = t.id WHERE rt.recipe_id = ?", (recipe_id,))]
+        self.assertEqual(recipe["category_key"], "lunch")
+        self.assertEqual(tags, ["family-favorite"])
+
+    def test_legacy_recipe_gets_uncategorized_and_no_tags(self):
+        self.signup_and_profile()
+        with self.recipe_app.db_connect() as conn:
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(recipes)")}
+            self.assertIn("category_key", columns)
+            user_id = conn.execute("SELECT id FROM users LIMIT 1").fetchone()["id"]
+            conn.execute("INSERT INTO recipes (id, owner_id, title, summary, prep_time, servings, ingredients_json, steps_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", ("r-legacy", user_id, "Legacy Soup", "Old card", "20 min", "2", json.dumps(["broth"]), json.dumps(["Cook."]), self.recipe_app.now_iso(), self.recipe_app.now_iso()))
+        response = self.client.get("/?q=legacy")
+        self.assertIn(b"Legacy Soup", response.data)
+        self.assertIn(b"Uncategorized", response.data)
+
+    def test_tag_limits_and_invalid_category_are_rejected(self):
+        self.signup_and_profile()
+        base = {
+            "title": "Bounded Recipe", "summary": "A bounded card.", "prep_time": "10 min", "servings": "1",
+            "ingredients": "rice", "steps": "Cook.", "category": "not valid!",
+            "tags": "one, two",
+        }
+        response = self.client.post("/recipes/new", data=base)
+        self.assertEqual(response.status_code, 422)
+        base["category"] = "dinner"
+        base["tags"] = ", ".join(f"tag-{index}" for index in range(13))
+        response = self.client.post("/recipes/new", data=base)
+        self.assertEqual(response.status_code, 422)
+        base["tags"] = "x" * 41
+        response = self.client.post("/recipes/new", data=base)
+        self.assertEqual(response.status_code, 422)
 
     def test_existing_database_migration_preserves_legacy_rows(self):
         self.recipe_app.DB_FILE.unlink()

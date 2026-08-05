@@ -4,6 +4,36 @@
 <section class="workspace">
   <div class="recipe-box">
     <p class="box-label">Shared cards</p>
+    <form class="filter-panel" method="get" action="{{ url_for('index') }}" aria-label="Filter recipes">
+      <label>Search recipes
+        <input name="q" value="{{ filters.q }}" maxlength="120" placeholder="Chicken, soup, quick...">
+      </label>
+      <div class="two">
+        <label>Category
+          <select name="category">
+            <option value="">All categories</option>
+            {% for item in categories %}
+              <option value="{{ item.category_key }}" {% if filters.category == item.category_key %}selected{% endif %}>{{ item.display_name }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>Tag
+          <select name="tag">
+            <option value="">All tags</option>
+            {% for item in available_tags %}
+              <option value="{{ item.normalized_name }}" {% if filters.tag == item.normalized_name %}selected{% endif %}>{{ item.display_name }}</option>
+            {% endfor %}
+          </select>
+        </label>
+      </div>
+      <div class="actions">
+        <button type="submit">Apply filters</button>
+        <a class="button secondary" href="{{ url_for('index') }}">Clear filters</a>
+      </div>
+    </form>
+    {% if filters.q or filters.category or filters.tag %}
+      <p class="active-filters" role="status">Active filters: {% if filters.q %}“{{ filters.q }}”{% endif %}{% if filters.category %} · {{ filters.category|replace('-', ' ')|title }}{% endif %}{% if filters.tag %} · #{{ filters.tag }}{% endif %}</p>
+    {% endif %}
     <div class="cards">
       {% for recipe in recipes %}
         <article class="recipe-card">
@@ -14,6 +44,7 @@
             </div>
             <div class="meta">&#9733; {{ recipe.average_rating or "New" }}{% if recipe.rating_count %} ({{ recipe.rating_count }}){% endif %}</div>
           </div>
+          <div class="badges"><span class="badge">{{ recipe.category_label }}</span>{% for tag in recipe.tags %}<span class="tag">#{{ tag.display_name }}</span>{% endfor %}</div>
           <p class="summary">{{ recipe.summary }}</p>
           <div class="tags">
             {% for item in recipe.ingredients[:5] %}
@@ -31,7 +62,7 @@
           </div>
         </article>
       {% else %}
-        <div class="empty">{% if user %}No recipes yet. Add the first card to the box.{% else %}Sign up to start building your recipe box.{% endif %}</div>
+        <div class="empty" role="status">{% if filters.q or filters.category or filters.tag %}No recipes matched these filters. Try clearing one or broadening your search.{% elif user %}No recipes yet. Add the first card to the box.{% else %}Sign up to start building your recipe box.{% endif %}</div>
       {% endfor %}
     </div>
   </div>

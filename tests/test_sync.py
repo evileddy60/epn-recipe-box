@@ -16,6 +16,11 @@ BASE_RECIPE = {
     "servings": "2",
     "ingredients": ["rice", "tomato"],
     "steps": ["Cook rice.", "Add tomato."],
+    "category": "dinner",
+    "tags": [
+        {"normalized_name": "quick", "display_name": "Quick"},
+        {"normalized_name": "vegetarian", "display_name": "Vegetarian"},
+    ],
     "created_at": "2026-08-04T10:00:00+00:00",
     "updated_at": "2026-08-04T10:00:00+00:00",
 }
@@ -41,6 +46,26 @@ class SyncContractTests(unittest.TestCase):
         local_changed = dict(BASE_RECIPE, title="Local title", updated_at="2026-08-04T11:01:00+00:00")
         remote_changed = dict(BASE_RECIPE, title="Remote title", updated_at="2026-08-04T11:02:00+00:00")
         self.assertEqual(classify_merge(local_changed, remote_changed, recipe_checksum(BASE_RECIPE)), "conflict")
+
+    def test_category_and_tags_are_checksum_fields_but_tag_order_is_ignored(self):
+        reversed_tags = dict(BASE_RECIPE, tags=list(reversed(BASE_RECIPE["tags"])))
+        self.assertEqual(recipe_checksum(BASE_RECIPE), recipe_checksum(reversed_tags))
+        self.assertNotEqual(recipe_checksum(BASE_RECIPE), recipe_checksum(dict(BASE_RECIPE, category="breakfast")))
+        self.assertNotEqual(recipe_checksum(BASE_RECIPE), recipe_checksum(dict(BASE_RECIPE, tags=[{"normalized_name": "quick", "display_name": "Quick"}])))
+
+    def test_older_payload_defaults_category_and_tags(self):
+        older = dict(BASE_RECIPE)
+        older.pop("category")
+        older.pop("tags")
+        normalized = validate_recipe_payload(older)
+        self.assertEqual(normalized["category"], "")
+        self.assertEqual(normalized["tags"], [])
+
+    def test_invalid_category_and_tags_are_rejected(self):
+        with self.assertRaises(ValueError):
+            validate_recipe_payload(dict(BASE_RECIPE, category="Not A Valid Category!"))
+        with self.assertRaises(ValueError):
+            validate_recipe_payload(dict(BASE_RECIPE, tags=[{"normalized_name": "", "display_name": ""}]))
 
 
 class SyncApiTests(unittest.TestCase):
@@ -71,6 +96,16 @@ class SyncApiTests(unittest.TestCase):
         response = self.client.get("/api/sync/manifest", headers={"Authorization": "Bearer test-sync-token"})
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["recipes"][0]["id"], BASE_RECIPE["id"])
+
+    def test_manifest_includes_category_and_tags(self):
+        with self.recipe_app.db_connect() as conn:
+            conn.execute("INSERT INTO users (id, email, password_hash, created_at) VALUES (?, ?, ?, ?)", ("u-1", "test@example.com", "unused", self.recipe_app.now_iso()))
+            conn.execute("INSERT INTO recipes (id, owner_id, title, summary, prep_time, servings, ingredients_json, steps_json, category_key, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (BASE_RECIPE["id"], "u-1", BASE_RECIPE["title"], BASE_RECIPE["summary"], BASE_RECIPE["prep_time"], BASE_RECIPE["servings"], json.dumps(BASE_RECIPE["ingredients"]), json.dumps(BASE_RECIPE["steps"]), "dinner", BASE_RECIPE["created_at"], BASE_RECIPE["updated_at"]))
+            self.recipe_app.replace_recipe_tags(conn, BASE_RECIPE["id"], BASE_RECIPE["tags"])
+        response = self.client.get("/api/sync/manifest", headers={"Authorization": "Bearer test-sync-token"})
+        payload = response.get_json()["recipes"][0]
+        self.assertEqual(payload["category"], "dinner")
+        self.assertEqual([tag["normalized_name"] for tag in payload["tags"]], ["quick", "vegetarian"])
 
     def test_sync_dashboard_does_not_render_peer_token(self):
         with self.recipe_app.db_connect() as conn:

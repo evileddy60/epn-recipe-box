@@ -17,6 +17,60 @@ from werkzeug.security import check_password_hash, generate_password_hash
 from sync import token_hash
 from .config import *
 
+CATEGORY_DEFAULTS = (
+    ("breakfast", "Breakfast"),
+    ("lunch", "Lunch"),
+    ("dinner", "Dinner"),
+    ("dessert", "Dessert"),
+    ("snack", "Snack"),
+    ("soup", "Soup"),
+    ("salad", "Salad"),
+    ("beverage", "Beverage"),
+    ("baking", "Baking"),
+    ("other", "Other"),
+)
+MAX_TAGS = 12
+MAX_TAG_LENGTH = 40
+MAX_TAG_INPUT = 400
+
+
+def normalize_category(value: str) -> str:
+    value = "-".join(str(value or "").strip().lower().split())
+    if value and not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,39}", value):
+        raise ValueError("Choose a valid recipe category.")
+    return value
+
+
+def normalize_tag(value: str) -> tuple[str, str]:
+    display = " ".join(str(value or "").strip().split())
+    if not display or len(display) > MAX_TAG_LENGTH:
+        raise ValueError("Tags must be between 1 and 40 characters.")
+    normalized = re.sub(r"[^a-z0-9]+", "-", display.lower()).strip("-")
+    if not normalized or len(normalized) > MAX_TAG_LENGTH:
+        raise ValueError("Tags may contain letters, numbers, spaces, and hyphens.")
+    return normalized, display
+
+
+def parse_tags(value: str) -> list[tuple[str, str]]:
+    if len(value or "") > MAX_TAG_INPUT:
+        raise ValueError("Tags are too long.")
+    parsed = []
+    seen = set()
+    for raw in re.split(r"[,\n]+", value or ""):
+        if not raw.strip():
+            continue
+        normalized, display = normalize_tag(raw)
+        if normalized not in seen:
+            parsed.append((normalized, display))
+            seen.add(normalized)
+    if len(parsed) > MAX_TAGS:
+        raise ValueError(f"Use no more than {MAX_TAGS} tags.")
+    return parsed
+
+
+def category_label(category_key: str) -> str:
+    return category_key.replace("-", " ").title() if category_key else "Uncategorized"
+
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
@@ -164,8 +218,27 @@ def init_db() -> None:
                 FOREIGN KEY (recipe_id) REFERENCES recipes(id) ON DELETE CASCADE,
                 FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
             );
+            CREATE TABLE IF NOT EXISTS categories (
+                category_key TEXT PRIMARY KEY,
+                display_name TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS tags (
+                id TEXT PRIMARY KEY,
+                normalized_name TEXT NOT NULL UNIQUE,
+                display_name TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS recipe_tags (
+                recipe_id TEXT NOT NULL,
+                tag_id TEXT NOT NULL,
+                PRIMARY KEY (recipe_id, tag_id),
+                FOREIGN KEY (recipe_id) REFERENCES recipes(id) ON DELETE CASCADE,
+                FOREIGN KEY (tag_id) REFERENCES tags(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_recipes_owner ON recipes(owner_id);
+            CREATE INDEX IF NOT EXISTS idx_recipe_tags_tag ON recipe_tags(tag_id);
             """
         )
+        conn.executemany("INSERT OR IGNORE INTO categories (category_key, display_name) VALUES (?, ?)", CATEGORY_DEFAULTS)
         conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS installations (
@@ -198,6 +271,8 @@ def init_db() -> None:
         required_alters = []
         if "sync_source_installation_id" not in recipe_columns:
             required_alters.append("ALTER TABLE recipes ADD COLUMN sync_source_installation_id TEXT NOT NULL DEFAULT ''")
+        if "category_key" not in recipe_columns:
+            required_alters.append("ALTER TABLE recipes ADD COLUMN category_key TEXT NOT NULL DEFAULT ''")
         if "email" not in user_columns:
             required_alters.append("ALTER TABLE users ADD COLUMN email TEXT NOT NULL DEFAULT ''")
         if "password_hash" not in user_columns:
@@ -210,6 +285,7 @@ def init_db() -> None:
                 conn.execute(statement)
             if "name" in user_columns and "nickname" not in user_columns:
                 conn.execute("UPDATE users SET nickname = name WHERE nickname = ''")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_recipes_category ON recipes(category_key)")
         installation = conn.execute("SELECT id FROM installations LIMIT 1").fetchone()
         if not installation:
             conn.execute("INSERT INTO installations (id, token_hash, created_at) VALUES (?, ?, ?)", (f"box-{uuid.uuid4().hex}", token_hash(sync_token()), now_iso()))
@@ -232,7 +308,8 @@ def row_to_user(row: sqlite3.Row, inventory: list[str] | None = None) -> dict:
     }
 
 
-def row_to_recipe(row: sqlite3.Row, ratings: list[dict] | None = None, comments: list[dict] | None = None) -> dict:
+def row_to_recipe(row: sqlite3.Row, ratings: list[dict] | None = None, comments: list[dict] | None = None, tags: list[dict] | None = None) -> dict:
+    category_key = row["category_key"] if "category_key" in row.keys() else ""
     return {
         "id": row["id"],
         "owner_id": row["owner_id"],
@@ -242,6 +319,9 @@ def row_to_recipe(row: sqlite3.Row, ratings: list[dict] | None = None, comments:
         "servings": row["servings"],
         "ingredients": json.loads(row["ingredients_json"]),
         "steps": json.loads(row["steps_json"]),
+        "category": category_key or "",
+        "category_label": category_label(category_key or ""),
+        "tags": tags or [],
         "ratings": ratings or [],
         "comments": comments or [],
         "created_at": row["created_at"],
@@ -250,41 +330,56 @@ def row_to_recipe(row: sqlite3.Row, ratings: list[dict] | None = None, comments:
     }
 
 
-def load_data() -> dict:
+def load_data(search: str = "", category: str = "", tag: str = "") -> dict:
     init_db()
+    search = " ".join((search or "").strip().split())[:120]
+    category = normalize_category(category) if category else ""
+    tag = normalize_tag(tag)[0] if tag else ""
     with db_connect() as conn:
         inventory_by_user = {}
         for row in conn.execute("SELECT user_id, item FROM inventory_items ORDER BY position, item"):
             inventory_by_user.setdefault(row["user_id"], []).append(row["item"])
-
-        users = [
-            row_to_user(row, inventory_by_user.get(row["id"], []))
-            for row in conn.execute("SELECT * FROM users ORDER BY created_at")
-        ]
-
+        users = [row_to_user(row, inventory_by_user.get(row["id"], [])) for row in conn.execute("SELECT * FROM users ORDER BY created_at")]
+        query = """
+            SELECT r.* FROM recipes r JOIN users owner ON owner.id = r.owner_id
+            WHERE 1 = 1
+        """
+        params = []
+        if search:
+            needle = f"%{search.lower()}%"
+            query += """ AND (
+                lower(r.title) LIKE ? OR lower(r.summary) LIKE ? OR lower(r.ingredients_json) LIKE ?
+                OR lower(COALESCE(r.category_key, '')) LIKE ? OR lower(owner.nickname) LIKE ?
+                OR EXISTS (SELECT 1 FROM recipe_tags sr_rt JOIN tags sr_t ON sr_t.id = sr_rt.tag_id WHERE sr_rt.recipe_id = r.id AND lower(sr_t.normalized_name) LIKE ?)
+            )"""
+            params.extend([needle] * 6)
+        if category:
+            query += " AND COALESCE(r.category_key, '') = ?"
+            params.append(category)
+        if tag:
+            query += " AND EXISTS (SELECT 1 FROM recipe_tags fr_rt JOIN tags fr_t ON fr_t.id = fr_rt.tag_id WHERE fr_rt.recipe_id = r.id AND fr_t.normalized_name = ?)"
+            params.append(tag)
+        query += " ORDER BY r.created_at DESC"
+        recipe_rows = conn.execute(query, params).fetchall()
+        recipe_ids = [row["id"] for row in recipe_rows]
+        tags_by_recipe = {}
+        if recipe_ids:
+            placeholders = ",".join("?" for _ in recipe_ids)
+            for row in conn.execute(f"SELECT rt.recipe_id, t.normalized_name, t.display_name FROM recipe_tags rt JOIN tags t ON t.id = rt.tag_id WHERE rt.recipe_id IN ({placeholders}) ORDER BY t.normalized_name", recipe_ids):
+                tags_by_recipe.setdefault(row["recipe_id"], []).append({"normalized_name": row["normalized_name"], "display_name": row["display_name"]})
         ratings_by_recipe = {}
         for row in conn.execute("SELECT recipe_id, user_id, score FROM ratings"):
-            ratings_by_recipe.setdefault(row["recipe_id"], []).append(
-                {"user_id": row["user_id"], "score": row["score"]}
-            )
-
+            ratings_by_recipe.setdefault(row["recipe_id"], []).append({"user_id": row["user_id"], "score": row["score"]})
         comments_by_recipe = {}
         for row in conn.execute("SELECT id, recipe_id, user_id, body, created_at FROM comments ORDER BY created_at"):
-            comments_by_recipe.setdefault(row["recipe_id"], []).append(
-                {
-                    "id": row["id"],
-                    "user_id": row["user_id"],
-                    "body": row["body"],
-                    "created_at": row["created_at"],
-                }
-            )
-
+            comments_by_recipe.setdefault(row["recipe_id"], []).append({"id": row["id"], "user_id": row["user_id"], "body": row["body"], "created_at": row["created_at"]})
         recipes = [
-            row_to_recipe(row, ratings_by_recipe.get(row["id"], []), comments_by_recipe.get(row["id"], []))
-            for row in conn.execute("SELECT * FROM recipes ORDER BY created_at DESC")
+            row_to_recipe(row, ratings_by_recipe.get(row["id"], []), comments_by_recipe.get(row["id"], []), tags_by_recipe.get(row["id"], []))
+            for row in recipe_rows
         ]
-
-    return {"users": users, "recipes": recipes}
+        categories = [dict(row) for row in conn.execute("SELECT category_key, display_name FROM categories ORDER BY display_name")]
+        tags = [dict(row) for row in conn.execute("SELECT normalized_name, display_name FROM tags ORDER BY normalized_name")]
+    return {"users": users, "recipes": recipes, "categories": categories, "tags": tags, "filters": {"q": search, "category": category, "tag": tag}}
 
 
 def create_account(email: str, password: str) -> str:
@@ -336,17 +431,46 @@ def update_inventory(user_id: str, items: list[str]) -> None:
         )
 
 
+def replace_recipe_tags(conn: sqlite3.Connection, recipe_id: str, raw_value: str | list[dict] | list[tuple[str, str]]) -> None:
+    if isinstance(raw_value, str):
+        parsed = parse_tags(raw_value)
+    else:
+        parsed = []
+        seen = set()
+        for item in raw_value or []:
+            if isinstance(item, dict):
+                pair = normalize_tag(str(item.get("display_name") or item.get("normalized_name") or ""))
+            else:
+                pair = normalize_tag(item[1] if isinstance(item, (tuple, list)) and len(item) > 1 else item)
+            if pair[0] not in seen:
+                parsed.append(pair)
+                seen.add(pair[0])
+        if len(parsed) > MAX_TAGS:
+            raise ValueError(f"Use no more than {MAX_TAGS} tags.")
+    conn.execute("DELETE FROM recipe_tags WHERE recipe_id = ?", (recipe_id,))
+    for normalized, display in parsed:
+        tag_id = f"tag-{normalized}"
+        conn.execute("INSERT OR IGNORE INTO tags (id, normalized_name, display_name) VALUES (?, ?, ?)", (tag_id, normalized, display))
+        conn.execute("UPDATE tags SET display_name = ? WHERE normalized_name = ?", (display, normalized))
+        conn.execute("INSERT INTO recipe_tags (recipe_id, tag_id) VALUES (?, ?)", (recipe_id, tag_id))
+
+
+def recipe_tag_payload(conn: sqlite3.Connection, recipe_id: str) -> list[dict]:
+    return [dict(row) for row in conn.execute("SELECT t.normalized_name, t.display_name FROM recipe_tags rt JOIN tags t ON t.id = rt.tag_id WHERE rt.recipe_id = ? ORDER BY t.normalized_name", (recipe_id,))]
+
+
 def create_recipe(owner_id: str, form) -> str:
     recipe_id = f"r-{uuid.uuid4().hex[:10]}"
     timestamp = now_iso()
+    category = normalize_category(form.get("category", ""))
     with db_connect() as conn:
         conn.execute(
             """
             INSERT INTO recipes (
                 id, owner_id, title, summary, prep_time, servings,
-                ingredients_json, steps_json, created_at, updated_at
+                ingredients_json, steps_json, category_key, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 recipe_id,
@@ -357,20 +481,23 @@ def create_recipe(owner_id: str, form) -> str:
                 form["servings"].strip(),
                 json.dumps(split_ingredients(form["ingredients"])),
                 json.dumps(split_lines(form["steps"])),
+                category,
                 timestamp,
                 timestamp,
             ),
         )
+        replace_recipe_tags(conn, recipe_id, form.get("tags", ""))
     return recipe_id
 
 
 def update_recipe(recipe_id: str, form) -> None:
+    category = normalize_category(form.get("category", ""))
     with db_connect() as conn:
         conn.execute(
             """
             UPDATE recipes
             SET title = ?, summary = ?, prep_time = ?, servings = ?,
-                ingredients_json = ?, steps_json = ?, updated_at = ?
+                ingredients_json = ?, steps_json = ?, category_key = ?, updated_at = ?
             WHERE id = ?
             """,
             (
@@ -380,10 +507,12 @@ def update_recipe(recipe_id: str, form) -> None:
                 form["servings"].strip(),
                 json.dumps(split_ingredients(form["ingredients"])),
                 json.dumps(split_lines(form["steps"])),
+                category,
                 now_iso(),
                 recipe_id,
             ),
         )
+        replace_recipe_tags(conn, recipe_id, form.get("tags", ""))
 
 
 def save_rating(recipe_id: str, user_id: str, score: int) -> None:

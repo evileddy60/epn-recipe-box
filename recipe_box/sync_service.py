@@ -49,8 +49,12 @@ def sync_recipe_payload(row: sqlite3.Row | dict) -> dict:
         "id": row["id"], "title": row["title"], "summary": row["summary"],
         "prep_time": row["prep_time"], "servings": row["servings"],
         "ingredients": json.loads(row["ingredients_json"]), "steps": json.loads(row["steps_json"]),
+        "category": row["category_key"] if "category_key" in row.keys() else "",
+        "tags": [],
         "created_at": row["created_at"], "updated_at": row["updated_at"],
     }
+    with db_connect() as tag_conn:
+        recipe["tags"] = recipe_tag_payload(tag_conn, row["id"])
     recipe = validate_recipe_payload(recipe)
     recipe["checksum"] = recipe_checksum(recipe)
     return recipe
@@ -121,9 +125,9 @@ def run_peer_sync(peer_id: str) -> dict:
             for item in preview["items"]:
                 remote = item["recipe"]; status = item["status"]
                 if status == "new":
-                    conn.execute("INSERT INTO recipes (id, owner_id, title, summary, prep_time, servings, ingredients_json, steps_json, created_at, updated_at, sync_source_installation_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (remote["id"], owner["id"], remote["title"], remote["summary"], remote["prep_time"], remote["servings"], json.dumps(remote["ingredients"]), json.dumps(remote["steps"]), remote["created_at"], remote["updated_at"], preview["source_installation_id"])); imported += 1
+                    conn.execute("INSERT INTO recipes (id, owner_id, title, summary, prep_time, servings, ingredients_json, steps_json, category_key, created_at, updated_at, sync_source_installation_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (remote["id"], owner["id"], remote["title"], remote["summary"], remote["prep_time"], remote["servings"], json.dumps(remote["ingredients"]), json.dumps(remote["steps"]), remote.get("category", ""), remote["created_at"], remote["updated_at"], preview["source_installation_id"])); replace_recipe_tags(conn, remote["id"], remote.get("tags", [])); imported += 1
                 elif status == "update":
-                    conn.execute("UPDATE recipes SET title=?, summary=?, prep_time=?, servings=?, ingredients_json=?, steps_json=?, updated_at=?, sync_source_installation_id=? WHERE id=?", (remote["title"], remote["summary"], remote["prep_time"], remote["servings"], json.dumps(remote["ingredients"]), json.dumps(remote["steps"]), remote["updated_at"], preview["source_installation_id"], remote["id"])); imported += 1
+                    conn.execute("UPDATE recipes SET title=?, summary=?, prep_time=?, servings=?, ingredients_json=?, steps_json=?, category_key=?, updated_at=?, sync_source_installation_id=? WHERE id=?", (remote["title"], remote["summary"], remote["prep_time"], remote["servings"], json.dumps(remote["ingredients"]), json.dumps(remote["steps"]), remote.get("category", ""), remote["updated_at"], preview["source_installation_id"], remote["id"])); replace_recipe_tags(conn, remote["id"], remote.get("tags", [])); imported += 1
                 elif status == "conflict":
                     existing_conflict = conn.execute("SELECT id FROM sync_conflicts WHERE peer_id = ? AND recipe_id = ? AND status = 'open'", (peer_id, remote["id"])).fetchone()
                     if not existing_conflict:
@@ -145,10 +149,12 @@ def resolve_sync_conflict_action(conflict_id: str, resolution: str) -> dict:
         if not conflict: raise ValueError("Conflict not found or already resolved.")
         local, remote = json.loads(conflict["local_json"]), json.loads(conflict["remote_json"])
         if resolution == "use_remote":
-            conn.execute("UPDATE recipes SET title=?, summary=?, prep_time=?, servings=?, ingredients_json=?, steps_json=?, updated_at=? WHERE id=?", (remote["title"], remote["summary"], remote["prep_time"], remote["servings"], json.dumps(remote["ingredients"]), json.dumps(remote["steps"]), remote["updated_at"], remote["id"]))
+            conn.execute("UPDATE recipes SET title=?, summary=?, prep_time=?, servings=?, ingredients_json=?, steps_json=?, category_key=?, updated_at=? WHERE id=?", (remote["title"], remote["summary"], remote["prep_time"], remote["servings"], json.dumps(remote["ingredients"]), json.dumps(remote["steps"]), remote.get("category", ""), remote["updated_at"], remote["id"]))
+            replace_recipe_tags(conn, remote["id"], remote.get("tags", []))
         elif resolution == "keep_both":
             copy = make_keep_both_copy(remote)
             owner = conn.execute("SELECT owner_id FROM recipes WHERE id = ?", (local["id"],)).fetchone()["owner_id"]
-            conn.execute("INSERT INTO recipes (id, owner_id, title, summary, prep_time, servings, ingredients_json, steps_json, created_at, updated_at, sync_source_installation_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'remote')", (copy["id"], owner, copy["title"], copy["summary"], copy["prep_time"], copy["servings"], json.dumps(copy["ingredients"]), json.dumps(copy["steps"]), copy["created_at"], copy["updated_at"]))
+            conn.execute("INSERT INTO recipes (id, owner_id, title, summary, prep_time, servings, ingredients_json, steps_json, category_key, created_at, updated_at, sync_source_installation_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'remote')", (copy["id"], owner, copy["title"], copy["summary"], copy["prep_time"], copy["servings"], json.dumps(copy["ingredients"]), json.dumps(copy["steps"]), copy.get("category", ""), copy["created_at"], copy["updated_at"]))
+            replace_recipe_tags(conn, copy["id"], copy.get("tags", []))
         conn.execute("UPDATE sync_conflicts SET status = 'resolved', resolved_at = ? WHERE id = ?", (now_iso(), conflict_id))
     return {"status": "resolved", "resolution": resolution}

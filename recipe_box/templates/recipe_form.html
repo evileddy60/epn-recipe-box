@@ -18,6 +18,18 @@
         <input name="servings" value="{{ recipe.servings if recipe else '' }}" placeholder="4" required>
       </label>
     </div>
+    <label>Category
+      <select name="category">
+        <option value="">Uncategorized</option>
+        {% for item in categories %}
+          <option value="{{ item.category_key }}" {% if recipe and recipe.category == item.category_key %}selected{% endif %}>{{ item.display_name }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Tags
+      <input name="tags" value="{{ recipe.tags|map(attribute='display_name')|join(', ') if recipe else '' }}" maxlength="400" placeholder="quick, vegetarian, comfort-food">
+      <span class="small">Use commas between up to 12 tags.</span>
+    </label>
     <label>Ingredients
       <textarea name="ingredients" placeholder="One per line or comma separated" required>{{ recipe.ingredients|join('\n') if recipe else '' }}</textarea>
     </label>

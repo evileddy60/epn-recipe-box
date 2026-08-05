@@ -11,6 +11,7 @@
       <div class="meta">&#9733; {{ recipe.average_rating or "New" }}</div>
     </div>
     <p class="summary">{{ recipe.summary }}</p>
+    <div class="badges"><span class="badge">{{ recipe.category_label }}</span>{% for tag in recipe.tags %}<span class="tag">#{{ tag.display_name }}</span>{% endfor %}</div>
 
     <h3>Ingredients</h3>
     <div class="tags">

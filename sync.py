@@ -17,6 +17,9 @@ from typing import Any
 
 MAX_SYNC_BODY_BYTES = 256 * 1024
 RECIPE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+CATEGORY_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
+TAG_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
+MAX_RECIPE_TAGS = 12
 REQUIRED_RECIPE_FIELDS = {
     "id", "title", "summary", "prep_time", "servings", "ingredients",
     "steps", "created_at", "updated_at",
@@ -34,7 +37,18 @@ def token_matches(token: str, expected_hash: str) -> bool:
 
 
 def canonical_recipe(recipe: dict[str, Any]) -> dict[str, Any]:
-    """Return only the stable, synchronizable recipe fields."""
+    """Return only stable, synchronizable recipe fields."""
+    raw_tags = recipe.get("tags") or []
+    tags = []
+    for item in raw_tags:
+        if isinstance(item, dict):
+            normalized = str(item.get("normalized_name", "")).strip().lower()
+            display = str(item.get("display_name", normalized)).strip()
+        else:
+            normalized = str(item).strip().lower()
+            display = str(item).strip()
+        tags.append({"normalized_name": normalized, "display_name": display})
+    tags.sort(key=lambda item: item["normalized_name"])
     return {
         "id": str(recipe["id"]),
         "title": str(recipe["title"]).strip(),
@@ -43,6 +57,8 @@ def canonical_recipe(recipe: dict[str, Any]) -> dict[str, Any]:
         "servings": str(recipe["servings"]).strip(),
         "ingredients": [str(item).strip() for item in recipe["ingredients"]],
         "steps": [str(item).strip() for item in recipe["steps"]],
+        "category": str(recipe.get("category", "") or "").strip().lower(),
+        "tags": tags,
         "created_at": str(recipe["created_at"]),
         "updated_at": str(recipe["updated_at"]),
     }
@@ -69,6 +85,21 @@ def validate_recipe_payload(payload: Any) -> dict[str, Any]:
             raise ValueError(f"recipe {field} is invalid")
         if any(not isinstance(item, str) or not item.strip() or len(item) > 2000 for item in payload[field]):
             raise ValueError(f"recipe {field} contains invalid items")
+    category = payload.get("category", "") or ""
+    if not isinstance(category, str) or (category and not CATEGORY_PATTERN.fullmatch(category.strip().lower())):
+        raise ValueError("recipe category is invalid")
+    raw_tags = payload.get("tags", [])
+    if not isinstance(raw_tags, list) or len(raw_tags) > MAX_RECIPE_TAGS:
+        raise ValueError("recipe tags are invalid")
+    seen_tags = set()
+    for tag in raw_tags:
+        if not isinstance(tag, dict):
+            raise ValueError("recipe tag is invalid")
+        normalized = str(tag.get("normalized_name", "")).strip().lower()
+        display = str(tag.get("display_name", "")).strip()
+        if not TAG_PATTERN.fullmatch(normalized) or not display or len(display) > 40 or normalized in seen_tags:
+            raise ValueError("recipe tag is invalid")
+        seen_tags.add(normalized)
     return canonical_recipe(payload)
 
 

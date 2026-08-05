@@ -22,7 +22,10 @@ def uploaded_file(filename):
 
 @bp.route("/")
 def index():
-    data = load_data()
+    search = request.args.get("q", "")
+    category = request.args.get("category", "")
+    tag = request.args.get("tag", "")
+    data = load_data(search=search, category=category, tag=tag)
     user = current_user(data)
     if not user:
         return redirect(url_for("signup"))
@@ -37,6 +40,9 @@ def index():
         user=user,
         recipes=recipes,
         suggestions=suggestions,
+        categories=data["categories"],
+        available_tags=data["tags"],
+        filters=data["filters"],
         active="cards",
     )
 
@@ -112,10 +118,14 @@ def new_recipe():
     if not profile_ready(user):
         return redirect(url_for("profile_setup"))
     if request.method == "POST":
-        recipe_id = create_recipe(user["id"], request.form)
+        try:
+            recipe_id = create_recipe(user["id"], request.form)
+        except ValueError as exc:
+            flash(str(exc), "error")
+            return render_template("recipe_form.html", title=APP_TITLE, user=user, recipe=None, categories=data["categories"], active="new"), 422
         flash("Recipe card added to the box.")
         return redirect(url_for("recipe_detail", recipe_id=recipe_id))
-    return render_template("recipe_form.html", title=APP_TITLE, user=user, recipe=None, active="new")
+    return render_template("recipe_form.html", title=APP_TITLE, user=user, recipe=None, categories=data["categories"], active="new")
 
 
 @bp.route("/recipes/<recipe_id>")
@@ -148,10 +158,14 @@ def edit_recipe(recipe_id):
         flash("Only the recipe owner can edit this card.", "error")
         return redirect(url_for("recipe_detail", recipe_id=recipe_id))
     if request.method == "POST":
-        update_recipe(recipe_id, request.form)
+        try:
+            update_recipe(recipe_id, request.form)
+        except ValueError as exc:
+            flash(str(exc), "error")
+            return render_template("recipe_form.html", title=APP_TITLE, user=user, recipe=recipe, categories=data["categories"], active="cards"), 422
         flash("Recipe card updated.")
         return redirect(url_for("recipe_detail", recipe_id=recipe_id))
-    return render_template("recipe_form.html", title=APP_TITLE, user=user, recipe=recipe, active="cards")
+    return render_template("recipe_form.html", title=APP_TITLE, user=user, recipe=recipe, categories=data["categories"], active="cards")
 
 
 @bp.route("/recipes/<recipe_id>/rate", methods=["POST"])
@@ -342,36 +356,6 @@ def api_sync_run():
     except (ValueError, RuntimeError) as exc: return sync_json_error("SYNC_FAILED", str(exc), 502)
 
 
-def run_peer_sync(peer_id: str) -> dict:
-    preview = preview_peer_changes(peer_id)
-    peer = get_sync_peer(peer_id)
-    started = now_iso(); history_id = f"sync-{uuid.uuid4().hex}"
-    imported = 0; conflicts = 0
-    try:
-        with db_connect() as conn:
-            owner = conn.execute("SELECT id FROM users ORDER BY created_at LIMIT 1").fetchone()
-            if not owner: raise ValueError("Create a local account before importing recipes.")
-            for item in preview["items"]:
-                remote = item["recipe"]; status = item["status"]
-                if status == "new":
-                    conn.execute("INSERT INTO recipes (id, owner_id, title, summary, prep_time, servings, ingredients_json, steps_json, created_at, updated_at, sync_source_installation_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (remote["id"], owner["id"], remote["title"], remote["summary"], remote["prep_time"], remote["servings"], json.dumps(remote["ingredients"]), json.dumps(remote["steps"]), remote["created_at"], remote["updated_at"], preview["source_installation_id"])); imported += 1
-                elif status == "update":
-                    conn.execute("UPDATE recipes SET title=?, summary=?, prep_time=?, servings=?, ingredients_json=?, steps_json=?, updated_at=?, sync_source_installation_id=? WHERE id=?", (remote["title"], remote["summary"], remote["prep_time"], remote["servings"], json.dumps(remote["ingredients"]), json.dumps(remote["steps"]), remote["updated_at"], preview["source_installation_id"], remote["id"])); imported += 1
-                elif status == "conflict":
-                    existing_conflict = conn.execute("SELECT id FROM sync_conflicts WHERE peer_id = ? AND recipe_id = ? AND status = 'open'", (peer_id, remote["id"])).fetchone()
-                    if not existing_conflict:
-                        conn.execute("INSERT INTO sync_conflicts (id, peer_id, recipe_id, local_json, remote_json, status, created_at) VALUES (?, ?, ?, ?, ?, 'open', ?)", (f"conflict-{uuid.uuid4().hex}", peer_id, remote["id"], json.dumps(item["local"]), json.dumps(remote), now_iso()))
-                    conflicts += 1
-                conn.execute("INSERT INTO sync_baselines (peer_id, recipe_id, checksum, remote_updated_at, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(peer_id, recipe_id) DO UPDATE SET checksum=excluded.checksum, remote_updated_at=excluded.remote_updated_at, updated_at=excluded.updated_at", (peer_id, remote["id"], recipe_checksum(remote), remote["updated_at"], now_iso()))
-            summary = dict(preview["counts"]); summary["imported"] = imported
-            conn.execute("UPDATE sync_peers SET last_sync_at = ? WHERE id = ?", (now_iso(), peer_id))
-            conn.execute("INSERT INTO sync_history (id, peer_id, started_at, finished_at, status, summary_json) VALUES (?, ?, ?, ?, ?, ?)", (history_id, peer_id, started, now_iso(), "conflict" if conflicts else "success", json.dumps(summary, sort_keys=True)))
-        return {"status": "conflict" if conflicts else "success", "summary": summary}
-    except Exception:
-        with db_connect() as conn: conn.execute("INSERT INTO sync_history (id, peer_id, started_at, finished_at, status, summary_json) VALUES (?, ?, ?, ?, 'failure', ?)", (history_id, peer_id, started, now_iso(), json.dumps({"error": "sync failed"})))
-        raise
-
-
 @bp.route("/sync/peers/<peer_id>/run", methods=["POST"])
 def run_sync_peer(peer_id):
     if not local_session_user(): return redirect(url_for("signup"))
@@ -387,22 +371,6 @@ def api_resolve_sync_conflict(conflict_id):
     if auth_error: return auth_error
     try: return jsonify(resolve_sync_conflict_action(conflict_id, (request.get_json(silent=True) or {}).get("resolution", "")))
     except ValueError as exc: return sync_json_error("VALIDATION_ERROR", str(exc), 422)
-
-
-def resolve_sync_conflict_action(conflict_id: str, resolution: str) -> dict:
-    if resolution not in {"keep_local", "use_remote", "keep_both"}: raise ValueError("resolution must be keep_local, use_remote, or keep_both")
-    with db_connect() as conn:
-        conflict = conn.execute("SELECT * FROM sync_conflicts WHERE id = ? AND status = 'open'", (conflict_id,)).fetchone()
-        if not conflict: raise ValueError("Conflict not found or already resolved.")
-        local, remote = json.loads(conflict["local_json"]), json.loads(conflict["remote_json"])
-        if resolution == "use_remote":
-            conn.execute("UPDATE recipes SET title=?, summary=?, prep_time=?, servings=?, ingredients_json=?, steps_json=?, updated_at=? WHERE id=?", (remote["title"], remote["summary"], remote["prep_time"], remote["servings"], json.dumps(remote["ingredients"]), json.dumps(remote["steps"]), remote["updated_at"], remote["id"]))
-        elif resolution == "keep_both":
-            copy = make_keep_both_copy(remote)
-            owner = conn.execute("SELECT owner_id FROM recipes WHERE id = ?", (local["id"],)).fetchone()["owner_id"]
-            conn.execute("INSERT INTO recipes (id, owner_id, title, summary, prep_time, servings, ingredients_json, steps_json, created_at, updated_at, sync_source_installation_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'remote')", (copy["id"], owner, copy["title"], copy["summary"], copy["prep_time"], copy["servings"], json.dumps(copy["ingredients"]), json.dumps(copy["steps"]), copy["created_at"], copy["updated_at"]))
-        conn.execute("UPDATE sync_conflicts SET status = 'resolved', resolved_at = ? WHERE id = ?", (now_iso(), conflict_id))
-    return {"status": "resolved", "resolution": resolution}
 
 
 @bp.route("/sync/conflicts/<conflict_id>/resolve", methods=["POST"])
