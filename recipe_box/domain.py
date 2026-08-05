@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 from flask import url_for
-from werkzeug.utils import secure_filename
+from PIL import Image, UnidentifiedImageError
 
 from . import config as _config
 from .config import *
@@ -255,11 +255,28 @@ def decorate_recipe(data: dict, recipe: dict, inventory: list[str] | None = None
 
 
 def save_avatar(upload) -> str:
-    if not upload or not upload.filename or not allowed_image(upload.filename):
+    if not upload or not upload.filename:
         return ""
-    filename = secure_filename(upload.filename)
-    suffix = filename.rsplit(".", 1)[1].lower()
-    stored_name = f"avatar-{uuid.uuid4().hex[:10]}.{suffix}"
-    upload.save(_config.UPLOAD_DIR / stored_name)
+    suffix = upload.filename.rsplit(".", 1)[-1].lower() if "." in upload.filename else ""
+    if suffix not in ALLOWED_IMAGE_EXTENSIONS:
+        raise ValueError("Avatar must be a PNG, JPEG, GIF, or WebP image.")
+    stream = upload.stream
+    stream.seek(0, 2)
+    if stream.tell() > 4 * 1024 * 1024:
+        raise ValueError("Avatar files must be 4 MB or smaller.")
+    stream.seek(0)
+    try:
+        with Image.open(stream) as image:
+            if image.width > 4096 or image.height > 4096 or image.width * image.height > 16_000_000:
+                raise ValueError("Avatar dimensions are too large.")
+            image.verify()
+    except (UnidentifiedImageError, OSError) as exc:
+        raise ValueError("The uploaded avatar is not a valid image.") from exc
+    stream.seek(0)
+    stored_name = f"avatar-{uuid.uuid4().hex}." + ("jpg" if suffix == "jpeg" else suffix)
+    target = (_config.UPLOAD_DIR / stored_name).resolve()
+    if target.parent != _config.UPLOAD_DIR.resolve():
+        raise ValueError("Invalid avatar path.")
+    upload.save(target)
     return f"uploads/{stored_name}"
 

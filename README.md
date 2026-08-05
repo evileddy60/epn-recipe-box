@@ -173,7 +173,34 @@ Treat sync tokens like passwords. Keep the service on a trusted LAN/private netw
 
 Before the first schema migration against an existing database, the app creates a timestamped `recipe_box.db.pre-sync-<UTC>.bak` backup in the data directory. Restore that backup with the existing stop/copy/start procedure below if rollback is required.
 
-## Testing
+## Security and deployment modes
+
+Set `EPN_ENV=production` in the systemd environment file. Production startup refuses a missing or shorter-than-32-character `SECRET_KEY`; it never prints the value. Development mode uses a process-local fallback only when `SECRET_KEY` is absent.
+
+For trusted LAN or Tailscale HTTP, keep `EPN_HTTPS=0`. Cookies remain HttpOnly and SameSite=Lax, but cannot be marked Secure because the transport is HTTP. This mode is private-network oriented and is not safe for direct public Internet exposure. For HTTPS behind a reverse proxy, set `EPN_HTTPS=1`; Secure cookies and HSTS are enabled. Public exposure additionally needs TLS termination, an authenticated reverse proxy, firewall policy, and coordinated rate limiting.
+
+State-changing browser forms use a signed session CSRF token. Bearer-authenticated peer synchronization endpoints use their own token authentication and are not browser-session CSRF endpoints. Security headers include CSP, frame protection, referrer policy, permissions policy, and content-type sniffing protection.
+
+Avatar uploads are verified by image content with Pillow, dimension/pixel limits, a 4 MB limit, generated filenames, and an upload-directory containment check. Invalid or executable-looking uploads are rejected.
+
+## Migrations and operational backups
+
+Startup runs numbered migrations recorded in `schema_version`. Pending migrations are transactional and create a timestamped `recipe_box.db.pre-sync-<UTC>.bak` before changes. Re-running startup is idempotent. See `docs/migrations-and-backups.md` and ADR-0004.
+
+The backup tool operates only on explicit paths and refuses to overwrite a restore target unless `--force` is supplied:
+
+```bash
+python tools/recipe_box_backup.py backup data/recipe_box.db --directory ~/recipe-box-backups
+python tools/recipe_box_backup.py verify ~/recipe-box-backups/recipe_box-<timestamp>.db
+python tools/recipe_box_backup.py restore ~/recipe-box-backups/recipe_box-<timestamp>.db /tmp/recipe-box-restored.db
+```
+
+`GET /health` returns only application status, database status, and schema version.
+
+## Continuous integration
+
+GitHub Actions runs on pushes and pull requests for Python 3.11–3.13. It installs pinned runtime/development dependencies and runs compilation, Ruff lint/format checks, the full unittest suite (including migration/backup/security/synchronization coverage), Bandit, pip-audit, and whitespace validation.
+
 
 The repository uses Python's built-in `unittest` framework so the test suite adds no runtime dependency:
 

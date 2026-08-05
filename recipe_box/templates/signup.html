@@ -5,7 +5,7 @@
   <div class="panel">
     <h2>Sign up</h2>
     <form method="post">
-      <input type="hidden" name="mode" value="signup">
+      {{ csrf_input() }}      <input type="hidden" name="mode" value="signup">
       <label>Email
         <input type="email" name="email" autocomplete="email" required>
       </label>
@@ -18,7 +18,7 @@
   <div class="panel">
     <h2>Sign in</h2>
     <form method="post">
-      <input type="hidden" name="mode" value="login">
+      {{ csrf_input() }}      <input type="hidden" name="mode" value="login">
       <label>Email
         <input type="email" name="email" autocomplete="email" required>
       </label>

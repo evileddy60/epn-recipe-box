@@ -5,6 +5,7 @@ import sqlite3
 import unittest
 from pathlib import Path
 
+from PIL import Image
 
 class ApplicationFlowTests(unittest.TestCase):
     def setUp(self):
@@ -26,6 +27,7 @@ class ApplicationFlowTests(unittest.TestCase):
         os.environ["SYNC_TOKEN"] = "application-test-token"
         os.environ["SECRET_KEY"] = "application-test-secret"
         recipe_app.init_db()
+        recipe_app.app.config.update(TESTING=True, ENFORCE_CSRF=False)
         self.client = recipe_app.app.test_client()
 
     def tearDown(self):
@@ -109,12 +111,15 @@ class ApplicationFlowTests(unittest.TestCase):
         response = self.client.post("/inventory/generated/save", data={"idea_id": "fried-rice", "kind": "now"})
         self.assertEqual(response.status_code, 302)
 
+        avatar_image = io.BytesIO()
+        Image.new("RGB", (20, 20), "blue").save(avatar_image, format="PNG")
+        avatar_image.seek(0)
         response = self.client.post(
             "/profile/setup",
             data={
                 "nickname": "Cook",
                 "bio": "Home cooking",
-                "avatar": (io.BytesIO(b"test image bytes"), "avatar.png"),
+                "avatar": (avatar_image, "avatar.png"),
             },
             content_type="multipart/form-data",
         )
@@ -153,6 +158,7 @@ class ApplicationFlowTests(unittest.TestCase):
         remote = dict(local, title="Remote title", steps=["Cook remotely."], category="dinner", tags=[{"normalized_name": "remote", "display_name": "remote"}], updated_at="2026-01-01T02:00:00+00:00")
         with self.recipe_app.db_connect() as conn:
             user_id = conn.execute("SELECT id FROM users LIMIT 1").fetchone()["id"]
+            conn.execute("INSERT INTO sync_peers (id, name, url, token, created_at) VALUES ('peer-test', 'Test peer', 'http://peer.test', 'token', ?)", (self.recipe_app.now_iso(),))
             conn.execute("INSERT INTO recipes (id, owner_id, title, summary, prep_time, servings, ingredients_json, steps_json, category_key, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (local["id"], user_id, local["title"], local["summary"], local["prep_time"], local["servings"], json.dumps(local["ingredients"]), json.dumps(local["steps"]), local["category"], local["created_at"], local["updated_at"]))
             self.recipe_app.replace_recipe_tags(conn, local["id"], local["tags"])
             for index, resolution in enumerate(("keep_local", "use_remote", "keep_both")):

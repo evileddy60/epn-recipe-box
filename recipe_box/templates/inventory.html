@@ -5,7 +5,7 @@
   <div class="panel">
     <h2>Food stock inventory</h2>
     <form method="post">
-      <label>Ingredients you have
+      {{ csrf_input() }}      <label>Ingredients you have
         <textarea name="inventory" placeholder="eggs, rice, spinach">{{ user.inventory|join('\n') }}</textarea>
       </label>
       <button class="green" type="submit">Update stock</button>
@@ -25,7 +25,7 @@
             {% endfor %}
           </div>
           <form method="post" action="{{ url_for('save_generated') }}">
-            <input type="hidden" name="idea_id" value="{{ idea.id }}">
+            {{ csrf_input() }}            <input type="hidden" name="idea_id" value="{{ idea.id }}">
             <input type="hidden" name="kind" value="{{ idea.kind }}">
             <button type="submit">Save recipe</button>
           </form>
@@ -51,7 +51,7 @@
             {% endfor %}
           </div>
           <form method="post" action="{{ url_for('save_generated') }}">
-            <input type="hidden" name="idea_id" value="{{ idea.id }}">
+            {{ csrf_input() }}            <input type="hidden" name="idea_id" value="{{ idea.id }}">
             <input type="hidden" name="kind" value="{{ idea.kind }}">
             <button class="secondary" type="submit">Save idea</button>
           </form>

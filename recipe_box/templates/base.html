@@ -30,7 +30,7 @@
         <a class="nav-chip" href="{{ url_for('sync_dashboard') }}">Sync</a>
         {% if user %}
           <form method="post" action="{{ url_for('logout') }}" style="margin:0;">
-            <button class="secondary" type="submit">Logout</button>
+            {{ csrf_input() }}            <button class="secondary" type="submit">Logout</button>
           </form>
         {% endif %}
       </nav>

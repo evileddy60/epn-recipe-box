@@ -4,7 +4,7 @@
 <section class="panel">
   <h2>{{ "Edit recipe" if recipe else "Create a recipe card" }}</h2>
   <form method="post">
-    <label>Recipe name
+    {{ csrf_input() }}    <label>Recipe name
       <input name="title" value="{{ recipe.title if recipe else '' }}" required>
     </label>
     <label>Short note

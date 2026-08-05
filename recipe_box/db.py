@@ -16,6 +16,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 
 from sync import token_hash
 from .config import *
+from .migrations import migrate_database, schema_version
 
 CATEGORY_DEFAULTS = (
     ("breakfast", "Breakfast"),
@@ -32,6 +33,15 @@ CATEGORY_DEFAULTS = (
 MAX_TAGS = 12
 MAX_TAG_LENGTH = 40
 MAX_TAG_INPUT = 400
+MAX_NICKNAME_LENGTH = 80
+MAX_BIO_LENGTH = 1000
+MAX_RECIPE_TITLE = 200
+MAX_RECIPE_SUMMARY = 1000
+MAX_RECIPE_INGREDIENTS = 6000
+MAX_RECIPE_STEPS = 10000
+MAX_COMMENT_LENGTH = 2000
+MAX_INVENTORY_LENGTH = 4000
+MAX_EMAIL_LENGTH = 254
 
 
 def normalize_category(value: str) -> str:
@@ -70,6 +80,7 @@ def parse_tags(value: str) -> list[tuple[str, str]]:
 
 def category_label(category_key: str) -> str:
     return category_key.replace("-", " ").title() if category_key else "Uncategorized"
+
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
@@ -137,6 +148,7 @@ def allowed_image(filename: str) -> bool:
 def db_connect() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
     return conn
 
 
@@ -164,6 +176,19 @@ def sync_token() -> str:
 
 
 def init_db() -> None:
+    migrate_database(DB_FILE)
+    with db_connect() as conn:
+        installation = conn.execute("SELECT id FROM installations LIMIT 1").fetchone()
+        if not installation:
+            conn.execute(
+                "INSERT INTO installations (id, token_hash, created_at) VALUES (?, ?, ?)",
+                (f"box-{uuid.uuid4().hex}", token_hash(sync_token()), now_iso()),
+            )
+        else:
+            conn.execute("UPDATE installations SET token_hash = ?", (token_hash(sync_token()),))
+
+
+def _legacy_init_db() -> None:
     with db_connect() as conn:
         conn.executescript(
             """
@@ -288,7 +313,10 @@ def init_db() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_recipes_category ON recipes(category_key)")
         installation = conn.execute("SELECT id FROM installations LIMIT 1").fetchone()
         if not installation:
-            conn.execute("INSERT INTO installations (id, token_hash, created_at) VALUES (?, ?, ?)", (f"box-{uuid.uuid4().hex}", token_hash(sync_token()), now_iso()))
+            conn.execute(
+                "INSERT INTO installations (id, token_hash, created_at) VALUES (?, ?, ?)",
+                (f"box-{uuid.uuid4().hex}", token_hash(sync_token()), now_iso()),
+            )
         else:
             conn.execute("UPDATE installations SET token_hash = ?", (token_hash(sync_token()),))
 
@@ -308,7 +336,9 @@ def row_to_user(row: sqlite3.Row, inventory: list[str] | None = None) -> dict:
     }
 
 
-def row_to_recipe(row: sqlite3.Row, ratings: list[dict] | None = None, comments: list[dict] | None = None, tags: list[dict] | None = None) -> dict:
+def row_to_recipe(
+    row: sqlite3.Row, ratings: list[dict] | None = None, comments: list[dict] | None = None, tags: list[dict] | None = None
+) -> dict:
     category_key = row["category_key"] if "category_key" in row.keys() else ""
     return {
         "id": row["id"],
@@ -365,24 +395,44 @@ def load_data(search: str = "", category: str = "", tag: str = "") -> dict:
         tags_by_recipe = {}
         if recipe_ids:
             placeholders = ",".join("?" for _ in recipe_ids)
-            for row in conn.execute(f"SELECT rt.recipe_id, t.normalized_name, t.display_name FROM recipe_tags rt JOIN tags t ON t.id = rt.tag_id WHERE rt.recipe_id IN ({placeholders}) ORDER BY t.normalized_name", recipe_ids):
-                tags_by_recipe.setdefault(row["recipe_id"], []).append({"normalized_name": row["normalized_name"], "display_name": row["display_name"]})
+            for row in conn.execute(
+                f"SELECT rt.recipe_id, t.normalized_name, t.display_name FROM recipe_tags rt JOIN tags t ON t.id = rt.tag_id WHERE rt.recipe_id IN ({placeholders}) ORDER BY t.normalized_name",  # nosec B608 - placeholders are generated only for bound integer recipe IDs; SQL structure is fixed
+                recipe_ids,
+            ):
+                tags_by_recipe.setdefault(row["recipe_id"], []).append(
+                    {"normalized_name": row["normalized_name"], "display_name": row["display_name"]}
+                )
         ratings_by_recipe = {}
         for row in conn.execute("SELECT recipe_id, user_id, score FROM ratings"):
             ratings_by_recipe.setdefault(row["recipe_id"], []).append({"user_id": row["user_id"], "score": row["score"]})
         comments_by_recipe = {}
         for row in conn.execute("SELECT id, recipe_id, user_id, body, created_at FROM comments ORDER BY created_at"):
-            comments_by_recipe.setdefault(row["recipe_id"], []).append({"id": row["id"], "user_id": row["user_id"], "body": row["body"], "created_at": row["created_at"]})
+            comments_by_recipe.setdefault(row["recipe_id"], []).append(
+                {"id": row["id"], "user_id": row["user_id"], "body": row["body"], "created_at": row["created_at"]}
+            )
         recipes = [
-            row_to_recipe(row, ratings_by_recipe.get(row["id"], []), comments_by_recipe.get(row["id"], []), tags_by_recipe.get(row["id"], []))
+            row_to_recipe(
+                row, ratings_by_recipe.get(row["id"], []), comments_by_recipe.get(row["id"], []), tags_by_recipe.get(row["id"], [])
+            )
             for row in recipe_rows
         ]
         categories = [dict(row) for row in conn.execute("SELECT category_key, display_name FROM categories ORDER BY display_name")]
         tags = [dict(row) for row in conn.execute("SELECT normalized_name, display_name FROM tags ORDER BY normalized_name")]
-    return {"users": users, "recipes": recipes, "categories": categories, "tags": tags, "filters": {"q": search, "category": category, "tag": tag}}
+    return {
+        "users": users,
+        "recipes": recipes,
+        "categories": categories,
+        "tags": tags,
+        "filters": {"q": search, "category": category, "tag": tag},
+    }
 
 
 def create_account(email: str, password: str) -> str:
+    email = email.strip().lower()
+    if len(email) > MAX_EMAIL_LENGTH or not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+        raise ValueError("Enter a valid email address.")
+    if not 8 <= len(password) <= 128:
+        raise ValueError("Password must be between 8 and 128 characters.")
     user_id = f"u-{uuid.uuid4().hex[:10]}"
     with db_connect() as conn:
         conn.execute(
@@ -408,6 +458,12 @@ def authenticate_user(email: str, password: str) -> str | None:
 
 
 def update_profile(user_id: str, nickname: str, bio: str, avatar: str) -> None:
+    nickname = " ".join(nickname.strip().split())
+    bio = bio.strip()
+    if not nickname or len(nickname) > MAX_NICKNAME_LENGTH:
+        raise ValueError("Nickname must be between 1 and 80 characters.")
+    if len(bio) > MAX_BIO_LENGTH:
+        raise ValueError("Biography is too long.")
     with db_connect() as conn:
         if avatar:
             conn.execute(
@@ -422,7 +478,9 @@ def update_profile(user_id: str, nickname: str, bio: str, avatar: str) -> None:
 
 
 def update_inventory(user_id: str, items: list[str]) -> None:
-    unique_items = list(dict.fromkeys(items))
+    if sum(len(item) + 1 for item in items) > MAX_INVENTORY_LENGTH or len(items) > 200:
+        raise ValueError("Inventory is too large.")
+    unique_items = list(dict.fromkeys(item.strip()[:100] for item in items if item.strip()))
     with db_connect() as conn:
         conn.execute("DELETE FROM inventory_items WHERE user_id = ?", (user_id,))
         conn.executemany(
@@ -456,10 +514,24 @@ def replace_recipe_tags(conn: sqlite3.Connection, recipe_id: str, raw_value: str
 
 
 def recipe_tag_payload(conn: sqlite3.Connection, recipe_id: str) -> list[dict]:
-    return [dict(row) for row in conn.execute("SELECT t.normalized_name, t.display_name FROM recipe_tags rt JOIN tags t ON t.id = rt.tag_id WHERE rt.recipe_id = ? ORDER BY t.normalized_name", (recipe_id,))]
+    return [
+        dict(row)
+        for row in conn.execute(
+            "SELECT t.normalized_name, t.display_name FROM recipe_tags rt JOIN tags t ON t.id = rt.tag_id WHERE rt.recipe_id = ? ORDER BY t.normalized_name",
+            (recipe_id,),
+        )
+    ]
 
 
 def create_recipe(owner_id: str, form) -> str:
+    title = form.get("title", "").strip()
+    summary = form.get("summary", "").strip()
+    ingredients = form.get("ingredients", "")
+    steps = form.get("steps", "")
+    if not title or len(title) > MAX_RECIPE_TITLE:
+        raise ValueError("Recipe title must be between 1 and 200 characters.")
+    if len(summary) > MAX_RECIPE_SUMMARY or len(ingredients) > MAX_RECIPE_INGREDIENTS or len(steps) > MAX_RECIPE_STEPS:
+        raise ValueError("Recipe text is too long.")
     recipe_id = f"r-{uuid.uuid4().hex[:10]}"
     timestamp = now_iso()
     category = normalize_category(form.get("category", ""))
@@ -491,6 +563,14 @@ def create_recipe(owner_id: str, form) -> str:
 
 
 def update_recipe(recipe_id: str, form) -> None:
+    title = form.get("title", "").strip()
+    summary = form.get("summary", "").strip()
+    ingredients = form.get("ingredients", "")
+    steps = form.get("steps", "")
+    if not title or len(title) > MAX_RECIPE_TITLE:
+        raise ValueError("Recipe title must be between 1 and 200 characters.")
+    if len(summary) > MAX_RECIPE_SUMMARY or len(ingredients) > MAX_RECIPE_INGREDIENTS or len(steps) > MAX_RECIPE_STEPS:
+        raise ValueError("Recipe text is too long.")
     category = normalize_category(form.get("category", ""))
     with db_connect() as conn:
         conn.execute(
@@ -529,6 +609,9 @@ def save_rating(recipe_id: str, user_id: str, score: int) -> None:
 
 
 def create_comment(recipe_id: str, user_id: str, body: str) -> None:
+    body = body.strip()
+    if not body or len(body) > MAX_COMMENT_LENGTH:
+        raise ValueError("Comments must be between 1 and 2,000 characters.")
     with db_connect() as conn:
         conn.execute(
             """
@@ -567,4 +650,3 @@ def suggestion_score(recipe: dict, inventory: list[str]) -> tuple[int, int, list
     matched = sorted(item for item in recipe["ingredients"] if stock_has(item, inventory))
     missing = sorted(item for item in recipe["ingredients"] if not stock_has(item, inventory))
     return len(matched), len(recipe_keys), matched, missing
-

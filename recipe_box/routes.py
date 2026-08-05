@@ -12,8 +12,18 @@ from .config import *
 from .db import *
 from .domain import *
 from .sync_service import *
+from .security import login_allowed, login_retry_after, record_login_failure, record_login_success, rotate_session
 
 bp = Blueprint("main", __name__)
+
+
+@bp.route("/health")
+def health():
+    init_db()
+    with db_connect() as conn:
+        conn.execute("SELECT 1").fetchone()
+    return jsonify({"status": "ok", "database": "ok", "schema_version": schema_version(DB_FILE)})
+
 
 @bp.route("/uploads/<path:filename>")
 def uploaded_file(filename):
@@ -60,23 +70,34 @@ def signup():
         password = request.form.get("password", "")
         mode = request.form.get("mode", "signup")
         if mode == "login":
+            if not login_allowed(email):
+                from flask import abort
+                response = abort(429, description="Too many unsuccessful login attempts. Try again shortly.")
             user_id = authenticate_user(email, password)
             if not user_id:
+                record_login_failure(email)
                 flash("Email or password did not match.", "error")
                 return redirect(url_for("signup"))
-            session["user_id"] = user_id
+            record_login_success(email)
+            rotate_session(user_id)
             data = load_data()
             user = current_user(data)
             return redirect(url_for("index") if profile_ready(user) else url_for("profile_setup"))
-        if len(password) < 8:
-            flash("Password must be at least 8 characters.", "error")
+        if len(password) < 8 or len(password) > 128:
+            flash("Password must be between 8 and 128 characters.", "error")
             return redirect(url_for("signup"))
         try:
             user_id = create_account(email, password)
+        except ValueError as exc:
+            flash(str(exc), "error")
+            return redirect(url_for("signup"))
         except sqlite3.IntegrityError:
             flash("An account already exists for that email. Sign in instead.", "error")
             return redirect(url_for("signup"))
+        session.clear()
         session["user_id"] = user_id
+        session["csrf_token"] = __import__("secrets").token_urlsafe(32)
+        session.permanent = True
         flash("Account created. Set up your profile next.")
         return redirect(url_for("profile_setup"))
     return render_template("signup.html", title=APP_TITLE, user=user, active="profile")
@@ -101,8 +122,11 @@ def profile_setup():
         if not nickname:
             flash("Choose a profile nickname.", "error")
             return redirect(url_for("profile_setup"))
-        avatar = save_avatar(request.files.get("avatar"))
-        update_profile(user["id"], nickname, request.form.get("bio", "").strip(), avatar)
+        try:
+            avatar = save_avatar(request.files.get("avatar"))
+            update_profile(user["id"], nickname, request.form.get("bio", "").strip(), avatar)
+        except ValueError as exc:
+            return render_template("profile_setup.html", title=APP_TITLE, user=user, active="profile", error=str(exc)), 400
         flash("Profile saved.")
         return redirect(url_for("index"))
     return render_template("profile_setup.html", title=APP_TITLE, user=user, active="profile")
@@ -195,7 +219,11 @@ def comment_recipe(recipe_id):
     recipe = next((item for item in data["recipes"] if item["id"] == recipe_id), None)
     body = request.form.get("body", "").strip()
     if recipe and body:
-        create_comment(recipe_id, user["id"], body)
+        try:
+            create_comment(recipe_id, user["id"], body)
+        except ValueError as exc:
+            flash(str(exc), "error")
+            return redirect(url_for("recipe_detail", recipe_id=recipe_id))
         flash("Comment added.")
     return redirect(url_for("recipe_detail", recipe_id=recipe_id))
 
@@ -209,7 +237,11 @@ def inventory():
     if not profile_ready(user):
         return redirect(url_for("profile_setup"))
     if request.method == "POST":
-        update_inventory(user["id"], split_ingredients(request.form.get("inventory", "")))
+        try:
+            update_inventory(user["id"], split_ingredients(request.form.get("inventory", "")))
+        except ValueError as exc:
+            flash(str(exc), "error")
+            return redirect(url_for("inventory"))
         flash("Food stock updated.")
         return redirect(url_for("inventory"))
     inventory_items = user.get("inventory", [])

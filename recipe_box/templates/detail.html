@@ -40,7 +40,7 @@
     <section class="panel">
       <h3>Rate this recipe</h3>
       <form method="post" action="{{ url_for('rate_recipe', recipe_id=recipe.id) }}">
-        <div class="rating-row">
+        {{ csrf_input() }}        <div class="rating-row">
           {% for score in range(1, 6) %}
             <button class="star-button" name="score" value="{{ score }}" title="{{ score }} stars">&#9733;</button>
           {% endfor %}
@@ -60,7 +60,7 @@
         <p class="small">No comments yet.</p>
       {% endfor %}
       <form method="post" action="{{ url_for('comment_recipe', recipe_id=recipe.id) }}">
-        <label>Add a comment
+        {{ csrf_input() }}        <label>Add a comment
           <textarea name="body" required></textarea>
         </label>
         <button type="submit">Post comment</button>

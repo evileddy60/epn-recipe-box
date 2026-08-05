@@ -77,7 +77,7 @@ def fetch_peer_manifest(peer: sqlite3.Row) -> dict:
         raise ValueError("Peer URL must be an HTTP or HTTPS URL without credentials.")
     request_obj = Request(endpoint, headers={"Authorization": f"Bearer {peer['token']}", "Accept": "application/json"})
     try:
-        with urlopen(request_obj, timeout=current_app.config["SYNC_TIMEOUT_SECONDS"]) as response:
+        with urlopen(request_obj, timeout=current_app.config["SYNC_TIMEOUT_SECONDS"]) as response:  # nosec B310 - endpoint is restricted to validated HTTP(S) URLs
             body = response.read(MAX_SYNC_BODY_BYTES + 1)
     except HTTPError as exc:
         raise RuntimeError(f"Peer returned HTTP {exc.code}.") from exc
