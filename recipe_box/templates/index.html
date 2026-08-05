@@ -1,0 +1,108 @@
+
+{% extends "base.html" %}
+{% block content %}
+<section class="workspace">
+  <div class="recipe-box">
+    <p class="box-label">Shared cards</p>
+    <form class="filter-panel" method="get" action="{{ url_for('index') }}" aria-label="Filter recipes">
+      <label>Search recipes
+        <input name="q" value="{{ filters.q }}" maxlength="120" placeholder="Chicken, soup, quick...">
+      </label>
+      <div class="two">
+        <label>Category
+          <select name="category">
+            <option value="">All categories</option>
+            {% for item in categories %}
+              <option value="{{ item.category_key }}" {% if filters.category == item.category_key %}selected{% endif %}>{{ item.display_name }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>Tag
+          <select name="tag">
+            <option value="">All tags</option>
+            {% for item in available_tags %}
+              <option value="{{ item.normalized_name }}" {% if filters.tag == item.normalized_name %}selected{% endif %}>{{ item.display_name }}</option>
+            {% endfor %}
+          </select>
+        </label>
+      </div>
+      <label class="check-row"><input type="checkbox" name="favorites" value="1" {% if filters.favorites %}checked{% endif %}> Favorites only</label>
+      <div class="actions">
+        <button type="submit">Apply filters</button>
+        <a class="button secondary" href="{{ url_for('index') }}">Clear filters</a>
+      </div>
+    </form>
+    {% if filters.q or filters.category or filters.tag %}
+      <p class="active-filters" role="status">Active filters: {% if filters.q %}“{{ filters.q }}”{% endif %}{% if filters.category %} · {{ filters.category|replace('-', ' ')|title }}{% endif %}{% if filters.tag %} · #{{ filters.tag }}{% endif %}</p>
+    {% endif %}
+    <div class="actions view-switcher">
+      <a class="button secondary" href="{{ url_for('index') }}">Active recipes</a>
+      <a class="button secondary" href="{{ url_for('index', favorites=1) }}">Favorites</a>
+      <a class="button secondary" href="{{ url_for('index', archived=1) }}">Archived</a>
+      <a class="button secondary" href="{{ url_for('export_all_recipes') }}">Export all</a>
+      <a class="button secondary" href="{{ url_for('import_preview') }}">Import</a>
+    </div>
+    <div class="cards">
+      {% for recipe in recipes %}
+        <article class="recipe-card">
+          {% if recipe.image_filename %}<img class="recipe-image" src="{{ url_for('recipe_image', filename=recipe.image_filename) }}" alt="Photo of {{ recipe.title }}" loading="lazy">{% else %}<div class="image-fallback" role="img" aria-label="No photo for {{ recipe.title }}">Recipe card</div>{% endif %}
+          <div class="recipe-head">
+            <div>
+              <h2>{{ recipe.title }}</h2>
+              <div class="meta">by {{ recipe.owner.name }} &middot; {{ recipe.prep_time }} &middot; {{ recipe.servings }} servings</div>
+            </div>
+            <div class="meta">&#9733; {{ recipe.average_rating or "New" }}{% if recipe.rating_count %} ({{ recipe.rating_count }}){% endif %}</div>
+          </div>
+          <div class="badges"><span class="badge">{{ recipe.category_label }}</span>{% for tag in recipe.tags %}<span class="tag">#{{ tag.display_name }}</span>{% endfor %}</div>
+          <p class="summary">{{ recipe.summary }}</p>
+          <div class="tags">
+            {% for item in recipe.ingredients[:5] %}
+              <span class="tag">{{ item }}</span>
+            {% endfor %}
+          </div>
+          {% if recipe.match_count %}
+            <div class="small">{{ recipe.match_count }} of {{ recipe.ingredient_count }} ingredients in stock</div>
+          {% endif %}
+          <div class="actions">
+            <a class="button" href="{{ url_for('recipe_detail', recipe_id=recipe.id) }}">Open card</a>
+            <form method="post" action="{{ url_for('unfavorite_recipe' if recipe.favorite else 'favorite_recipe', recipe_id=recipe.id) }}">{{ csrf_input() }}<button class="secondary" type="submit" aria-label="{{ 'Unfavorite' if recipe.favorite else 'Favorite' }} {{ recipe.title }}">{{ '★ Unfavorite' if recipe.favorite else '☆ Favorite' }}</button></form>
+            {% if user and recipe.owner_id == user.id %}
+              <a class="button secondary" href="{{ url_for('edit_recipe', recipe_id=recipe.id) }}">Edit</a>
+              {% if recipe.archived_at %}<form method="post" action="{{ url_for('restore_recipe', recipe_id=recipe.id) }}">{{ csrf_input() }}<button class="green" type="submit">Restore</button></form>{% else %}<form method="post" action="{{ url_for('archive_recipe', recipe_id=recipe.id) }}">{{ csrf_input() }}<button class="secondary" type="submit">Archive</button></form>{% endif %}
+            {% endif %}
+          </div>
+        </article>
+      {% else %}
+        <div class="empty" role="status">{% if filters.q or filters.category or filters.tag %}No recipes matched these filters. Try clearing one or broadening your search.{% elif user %}No recipes yet. Add the first card to the box.{% else %}Sign up to start building your recipe box.{% endif %}</div>
+      {% endfor %}
+    </div>
+  </div>
+
+  <aside>
+    <section class="panel">
+      <h3>Your food stock</h3>
+      {% if user.inventory %}
+        <div class="tags">
+          {% for item in user.inventory %}
+            <span class="tag">{{ item }}</span>
+          {% endfor %}
+        </div>
+      {% else %}
+        <p class="small">Add ingredients to unlock recipe suggestions.</p>
+      {% endif %}
+      <div class="actions">
+        <a class="button green" href="{{ url_for('inventory') }}">Update stock</a>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h3>Best matches</h3>
+      {% for recipe in suggestions %}
+        <p><strong>{{ recipe.title }}</strong><br><span class="small">{{ recipe.match_count }} of {{ recipe.ingredient_count }} matched</span></p>
+      {% else %}
+        <p class="small">Add stock items and recipes will sort themselves into place.</p>
+      {% endfor %}
+    </section>
+  </aside>
+</section>
+{% endblock %}

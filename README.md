@@ -13,6 +13,10 @@ EPN Recipe Box is a small Flask web app for creating, sharing, rating, and comme
 - Generate recipe ideas from stocked ingredients
 - Suggest recipes that need one extra ingredient
 - Local SQLite database storage
+- Manual peer synchronization over a LAN or private network with previewed imports and conflict protection
+- One validated primary image per recipe with safe local storage and optimized display output
+- Versioned JSON recipe export/import with preview, conflict reporting, and explicit keep-both handling
+- User-local favorites and non-destructive archived recipes
 
 ## Project Files
 
@@ -156,6 +160,62 @@ http://raspberrypi:5000/
 
 This keeps the app private to your Tailscale network instead of exposing it publicly.
 
+## Synchronize With Another Recipe Box
+
+The first synchronization version is a manual, peer-to-peer pull workflow. It uses the existing Flask host, works over a LAN or Tailscale/private network, and does not open firewall ports or require a cloud service.
+
+1. Set `SYNC_TOKEN` in the environment file on each installation, or let the app generate a token in `data/.sync-token`.
+2. Sign in and open **Sync**.
+3. Add the trusted peer's base URL and shared token.
+4. Preview changes before selecting **Sync now**.
+5. Resolve any conflicts with **Keep local**, **Use remote**, or **Keep both**.
+
+The API exposes authenticated `GET /api/sync/manifest` and `GET /api/sync/recipes/<id>` endpoints. The local UI uses `/api/sync/preview`, `/api/sync/run`, and the conflict-resolution endpoint. Recipe cards carry stable IDs, timestamps, and SHA-256 content checksums. Recipe image binaries, image filesystem paths, favorites, archive state, ratings, comments, and accounts remain local in this version. Older peers continue to receive the existing recipe payload shape.
+
+Recipe JSON exchange uses the versioned `epn-recipe-box.recipe-exchange` envelope through one-recipe and all-owned export actions plus preview/apply import actions. Image metadata may be included, but image bytes and remote URLs are intentionally excluded.
+
+Treat sync tokens like passwords. Keep the service on a trusted LAN/private network or place it behind HTTPS and an authenticated reverse proxy before exposing it outside the LAN. Tokens are never rendered in the interface or application logs.
+
+Before the first schema migration against an existing database, the app creates a timestamped `recipe_box.db.pre-sync-<UTC>.bak` backup in the data directory. Restore that backup with the existing stop/copy/start procedure below if rollback is required.
+
+## Security and deployment modes
+
+Set `EPN_ENV=production` in the systemd environment file. Production startup refuses a missing or shorter-than-32-character `SECRET_KEY`; it never prints the value. Development mode uses a process-local fallback only when `SECRET_KEY` is absent.
+
+For trusted LAN or Tailscale HTTP, keep `EPN_HTTPS=0`. Cookies remain HttpOnly and SameSite=Lax, but cannot be marked Secure because the transport is HTTP. This mode is private-network oriented and is not safe for direct public Internet exposure. For HTTPS behind a reverse proxy, set `EPN_HTTPS=1`; Secure cookies and HSTS are enabled. Public exposure additionally needs TLS termination, an authenticated reverse proxy, firewall policy, and coordinated rate limiting.
+
+State-changing browser forms use a signed session CSRF token. Bearer-authenticated peer synchronization endpoints use their own token authentication and are not browser-session CSRF endpoints. Security headers include CSP, frame protection, referrer policy, permissions policy, and content-type sniffing protection.
+
+Avatar uploads are verified by image content with Pillow, dimension/pixel limits, a 4 MB limit, generated filenames, and an upload-directory containment check. Invalid or executable-looking uploads are rejected.
+
+## Migrations and operational backups
+
+Startup runs numbered migrations recorded in `schema_version`. Pending migrations are transactional and create a timestamped `recipe_box.db.pre-sync-<UTC>.bak` before changes. Re-running startup is idempotent. See `docs/migrations-and-backups.md` and ADR-0004.
+
+The backup tool operates only on explicit paths and refuses to overwrite a restore target unless `--force` is supplied. It backs up the SQLite file and, when present, copies the sibling `data/recipe-images/` directory to a `<backup-stem>.recipe-images/` sidecar so recipe image assets restore with the database:
+
+```bash
+python tools/recipe_box_backup.py backup data/recipe_box.db --directory ~/recipe-box-backups
+python tools/recipe_box_backup.py verify ~/recipe-box-backups/recipe_box-<timestamp>.db
+python tools/recipe_box_backup.py restore ~/recipe-box-backups/recipe_box-<timestamp>.db /tmp/recipe-box-restored.db
+```
+
+`GET /health` returns only application status, database status, and schema version.
+
+## Continuous integration
+
+GitHub Actions runs on pushes and pull requests for Python 3.11–3.13. It installs pinned runtime/development dependencies and runs compilation, Ruff lint/format checks, the full unittest suite (including migration/backup/security/synchronization coverage), Bandit, pip-audit, and whitespace validation.
+
+
+The repository uses Python's built-in `unittest` framework so the test suite adds no runtime dependency:
+
+```bash
+python3 -m py_compile app.py sync.py tests/test_sync.py
+python3 -m unittest discover -s tests -v
+```
+
+The test suite uses temporary SQLite directories and never touches production recipe data.
+
 ## How To Use
 
 1. Create an account with your email and password.
@@ -188,7 +248,7 @@ Stop the app before backing up to avoid copying the database mid-write:
 sudo systemctl stop epn-recipe-box
 mkdir -p ~/epn-recipe-box-backups
 cp data/recipe_box.db ~/epn-recipe-box-backups/recipe_box-$(date +%Y-%m-%d).db
-tar -czf ~/epn-recipe-box-backups/uploads-$(date +%Y-%m-%d).tar.gz data/uploads
+tar -czf ~/epn-recipe-box-backups/uploads-$(date +%Y-%m-%d).tar.gz data/uploads data/recipe-images
 sudo systemctl start epn-recipe-box
 ```
 

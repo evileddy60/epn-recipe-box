@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="panel">
+  <h2>Import recipe exchange</h2>
+  {% if error %}<p class="flash error" role="alert">{{ error }}</p>{% endif %}
+  {% if result %}
+    <p role="status">{% if applied %}Import applied.{% else %}Preview ready. Nothing has been changed yet.{% endif %}</p>
+    <div class="import-summary" aria-label="Import result summary">
+      {% for key, value in result.counts.items() %}<span class="badge">{{ key|title }}: {{ value }}</span>{% endfor %}
+    </div>
+    <ul>
+      {% for item in result["items"] %}<li>{{ item.title }} — <strong>{{ item.status }}</strong></li>{% endfor %}
+    </ul>
+    {% if payload and not applied %}
+      <form method="post" action="{{ url_for('import_apply') }}">
+        {{ csrf_input() }}
+        <input type="hidden" name="exchange_json" value='{{ payload }}'>
+        <label>Conflict handling
+          <select name="conflict_action">
+            <option value="reject">Reject conflicts</option>
+            <option value="keep_both">Keep both versions</option>
+          </select>
+        </label>
+        <button type="submit">Apply import</button>
+      </form>
+    {% endif %}
+  {% else %}
+    <form method="post" action="{{ url_for('import_preview') }}" enctype="multipart/form-data">
+      {{ csrf_input() }}
+      <label>Recipe exchange JSON
+        <input type="file" name="exchange" accept="application/json,.json" required>
+      </label>
+      <button type="submit">Preview import</button>
+    </form>
+  {% endif %}
+</section>
+{% endblock %}

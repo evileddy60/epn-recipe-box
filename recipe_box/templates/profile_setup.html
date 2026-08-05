@@ -1,0 +1,29 @@
+
+{% extends "base.html" %}
+{% block content %}
+<section class="workspace">
+  <div class="panel">
+    <h2>Set up profile</h2>
+    {% if error %}<div class="flash error" role="alert">{{ error }}</div>{% endif %}
+    <form method="post" enctype="multipart/form-data">
+    {{ csrf_input() }}      <label>Profile nickname
+        <input name="nickname" value="{{ user.nickname if user else '' }}" autocomplete="nickname" required>
+      </label>
+      <label>About
+        <textarea name="bio" placeholder="Favorite cuisines, dietary notes, cooking style">{{ user.bio if user else '' }}</textarea>
+      </label>
+      <label>Avatar
+        <input type="file" name="avatar" accept="image/*">
+      </label>
+      <button type="submit">Save profile</button>
+    </form>
+  </div>
+  <div class="panel">
+    <h2>Account</h2>
+    <p class="small">{{ user.email }}</p>
+    <form method="post" action="{{ url_for('logout') }}">
+      {{ csrf_input() }}      <button class="secondary" type="submit">Logout</button>
+    </form>
+  </div>
+</section>
+{% endblock %}
