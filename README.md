@@ -13,6 +13,7 @@ EPN Recipe Box is a small Flask web app for creating, sharing, rating, and comme
 - Generate recipe ideas from stocked ingredients
 - Suggest recipes that need one extra ingredient
 - Local SQLite database storage
+- Manual peer synchronization over a LAN or private network with previewed imports and conflict protection
 
 ## Project Files
 
@@ -155,6 +156,33 @@ http://raspberrypi:5000/
 ```
 
 This keeps the app private to your Tailscale network instead of exposing it publicly.
+
+## Synchronize With Another Recipe Box
+
+The first synchronization version is a manual, peer-to-peer pull workflow. It uses the existing Flask host, works over a LAN or Tailscale/private network, and does not open firewall ports or require a cloud service.
+
+1. Set `SYNC_TOKEN` in the environment file on each installation, or let the app generate a token in `data/.sync-token`.
+2. Sign in and open **Sync**.
+3. Add the trusted peer's base URL and shared token.
+4. Preview changes before selecting **Sync now**.
+5. Resolve any conflicts with **Keep local**, **Use remote**, or **Keep both**.
+
+The API exposes authenticated `GET /api/sync/manifest` and `GET /api/sync/recipes/<id>` endpoints. The local UI uses `/api/sync/preview`, `/api/sync/run`, and the conflict-resolution endpoint. Recipe cards carry stable IDs, timestamps, and SHA-256 content checksums. Ratings, comments, accounts, and deletions remain local in this version.
+
+Treat sync tokens like passwords. Keep the service on a trusted LAN/private network or place it behind HTTPS and an authenticated reverse proxy before exposing it outside the LAN. Tokens are never rendered in the interface or application logs.
+
+Before the first schema migration against an existing database, the app creates a timestamped `recipe_box.db.pre-sync-<UTC>.bak` backup in the data directory. Restore that backup with the existing stop/copy/start procedure below if rollback is required.
+
+## Testing
+
+The repository uses Python's built-in `unittest` framework so the test suite adds no runtime dependency:
+
+```bash
+python3 -m py_compile app.py sync.py tests/test_sync.py
+python3 -m unittest discover -s tests -v
+```
+
+The test suite uses temporary SQLite directories and never touches production recipe data.
 
 ## How To Use
 

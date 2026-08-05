@@ -1,15 +1,23 @@
+import hashlib
 import json
 import os
 import re
+import secrets
+import shutil
 import sqlite3
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode, urljoin, urlparse
+from urllib.request import Request, urlopen
 
-from flask import Flask, flash, redirect, render_template_string, request, send_from_directory, session, url_for
+from flask import Flask, flash, jsonify, redirect, render_template_string, request, send_from_directory, session, url_for
 from jinja2 import DictLoader
 from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.utils import secure_filename
+
+from sync import MAX_SYNC_BODY_BYTES, canonical_recipe, classify_merge, make_keep_both_copy, recipe_checksum, token_hash, token_matches, validate_recipe_payload
 
 
 APP_TITLE = "EPN Recipe Box"
@@ -27,9 +35,18 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 app.config["MAX_CONTENT_LENGTH"] = 8 * 1024 * 1024
+app.config["SYNC_TIMEOUT_SECONDS"] = float(os.environ.get("SYNC_TIMEOUT_SECONDS", "5"))
 
 
 def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+
+
+def utc_stamp() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def now_iso_legacy() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
@@ -90,6 +107,29 @@ def db_connect() -> sqlite3.Connection:
     return conn
 
 
+def _backup_database_before_migration() -> None:
+    if not DB_FILE.exists():
+        return
+    backup = DB_FILE.with_name(f"{DB_FILE.name}.pre-sync-{utc_stamp()}.bak")
+    shutil.copy2(DB_FILE, backup)
+
+
+def sync_token() -> str:
+    configured = os.environ.get("SYNC_TOKEN", "").strip()
+    if configured:
+        return configured
+    token_file = DATA_DIR / ".sync-token"
+    if token_file.exists():
+        return token_file.read_text(encoding="utf-8").strip()
+    token = secrets.token_urlsafe(32)
+    token_file.write_text(token + "\n", encoding="utf-8")
+    try:
+        token_file.chmod(0o600)
+    except OSError:
+        pass
+    return token
+
+
 def init_db() -> None:
     with db_connect() as conn:
         conn.executescript(
@@ -147,7 +187,48 @@ def init_db() -> None:
             );
             """
         )
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS installations (
+                id TEXT PRIMARY KEY, token_hash TEXT NOT NULL, created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS sync_peers (
+                id TEXT PRIMARY KEY, name TEXT NOT NULL, url TEXT NOT NULL, token TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1, last_sync_at TEXT, created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS sync_baselines (
+                peer_id TEXT NOT NULL, recipe_id TEXT NOT NULL, checksum TEXT NOT NULL,
+                remote_updated_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                PRIMARY KEY (peer_id, recipe_id), FOREIGN KEY (peer_id) REFERENCES sync_peers(id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS sync_conflicts (
+                id TEXT PRIMARY KEY, peer_id TEXT NOT NULL, recipe_id TEXT NOT NULL,
+                local_json TEXT NOT NULL, remote_json TEXT NOT NULL, status TEXT NOT NULL,
+                created_at TEXT NOT NULL, resolved_at TEXT,
+                FOREIGN KEY (peer_id) REFERENCES sync_peers(id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS sync_history (
+                id TEXT PRIMARY KEY, peer_id TEXT NOT NULL, started_at TEXT NOT NULL,
+                finished_at TEXT, status TEXT NOT NULL, summary_json TEXT NOT NULL,
+                FOREIGN KEY (peer_id) REFERENCES sync_peers(id) ON DELETE CASCADE
+            );
+            """
+        )
         user_columns = {row["name"] for row in conn.execute("PRAGMA table_info(users)")}
+        recipe_columns = {row["name"] for row in conn.execute("PRAGMA table_info(recipes)")}
+        required_alters = []
+        if "sync_source_installation_id" not in recipe_columns:
+            required_alters.append("ALTER TABLE recipes ADD COLUMN sync_source_installation_id TEXT NOT NULL DEFAULT ''")
+        if "email" not in user_columns:
+            required_alters.append("ALTER TABLE users ADD COLUMN email TEXT NOT NULL DEFAULT ''")
+        if "password_hash" not in user_columns:
+            required_alters.append("ALTER TABLE users ADD COLUMN password_hash TEXT NOT NULL DEFAULT ''")
+        if "nickname" not in user_columns:
+            required_alters.append("ALTER TABLE users ADD COLUMN nickname TEXT NOT NULL DEFAULT ''")
+        if required_alters:
+            _backup_database_before_migration()
+            for statement in required_alters:
+                conn.execute(statement)
         if "email" not in user_columns:
             conn.execute("ALTER TABLE users ADD COLUMN email TEXT NOT NULL DEFAULT ''")
         if "password_hash" not in user_columns:
@@ -156,6 +237,11 @@ def init_db() -> None:
             conn.execute("ALTER TABLE users ADD COLUMN nickname TEXT NOT NULL DEFAULT ''")
             if "name" in user_columns:
                 conn.execute("UPDATE users SET nickname = name WHERE nickname = ''")
+        installation = conn.execute("SELECT id FROM installations LIMIT 1").fetchone()
+        if not installation:
+            conn.execute("INSERT INTO installations (id, token_hash, created_at) VALUES (?, ?, ?)", (f"box-{uuid.uuid4().hex}", token_hash(sync_token()), now_iso()))
+        else:
+            conn.execute("UPDATE installations SET token_hash = ?", (token_hash(sync_token()),))
 
 
 def row_to_user(row: sqlite3.Row, inventory: list[str] | None = None) -> dict:
@@ -187,6 +273,7 @@ def row_to_recipe(row: sqlite3.Row, ratings: list[dict] | None = None, comments:
         "comments": comments or [],
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
+        "sync_source_installation_id": row["sync_source_installation_id"] if "sync_source_installation_id" in row.keys() else "",
     }
 
 
@@ -938,8 +1025,21 @@ TEMPLATE = """
       background: #fff4d8;
       color: var(--accent-dark);
     }
+    .eyebrow { margin: 0 0 4px; color: var(--accent-dark); text-transform: uppercase; letter-spacing: .12em; font-size: .76rem; font-weight: 800; }
+    .sync-grid { display: grid; gap: 14px; }
+    .peer-card, .status-note, .preview-row, .conflict-row { padding: 12px; border: 1px solid #dfbd7a; border-radius: 8px; background: rgba(255,248,232,.72); }
+    .peer-card + .peer-card, .preview-row + .preview-row { margin-top: 10px; }
+    .status-note { color: #315434; background: #ecf5df; border-color: #bad19c; }
+    .status-badge { display: inline-flex; align-items: center; min-height: 30px; padding: 4px 9px; border-radius: 999px; font-size: .78rem; font-weight: 800; }
+    .status-badge.ok { color: #315434; background: #dcebd1; }
+    .status-badge.muted { color: var(--muted); background: #eee1c9; }
+    .preview-row strong { text-transform: capitalize; color: var(--accent-dark); }
+    .conflict-row { border-color: #e3a493; background: #fff0ec; }
+    button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visible { outline: 3px solid var(--blue); outline-offset: 3px; }
+    button:active, .button:active { transform: scale(.96); }
+    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; } }
     @media (min-width: 740px) {
-      .shell { padding: 24px 22px 36px; }
+      .sync-grid { grid-template-columns: minmax(0, 1.35fr) minmax(270px, .8fr); align-items: start; }
       .hero { min-height: 330px; padding: 30px; }
       .workspace { grid-template-columns: minmax(0, 1.5fr) minmax(270px, .8fr); align-items: start; }
       .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -969,6 +1069,7 @@ TEMPLATE = """
         <a class="nav-chip" href="{{ url_for('index') }}">Cards</a>
         <a class="nav-chip" href="{{ url_for('new_recipe') }}">New recipe</a>
         <a class="nav-chip" href="{{ url_for('inventory') }}">Inventory</a>
+        <a class="nav-chip" href="{{ url_for('sync_dashboard') }}">Sync</a>
         {% if user %}
           <form method="post" action="{{ url_for('logout') }}" style="margin:0;">
             <button class="secondary" type="submit">Logout</button>
@@ -990,6 +1091,7 @@ TEMPLATE = """
     <a class="{% if active == 'cards' %}active{% endif %}" href="{{ url_for('index') }}">Cards</a>
     <a class="{% if active == 'new' %}active{% endif %}" href="{{ url_for('new_recipe') }}">Create</a>
     <a class="{% if active == 'inventory' %}active{% endif %}" href="{{ url_for('inventory') }}">Stock</a>
+    <a class="{% if active == 'sync' %}active{% endif %}" href="{{ url_for('sync_dashboard') }}">Sync</a>
     <a class="{% if active == 'profile' %}active{% endif %}" href="{{ url_for('profile_setup') if user else url_for('signup') }}">{{ "Profile" if user and user.nickname else "Sign up" }}</a>
   </nav>
 </body>
@@ -1563,6 +1665,324 @@ def save_generated():
     recipe_id = save_generated_recipe(user["id"], idea)
     flash("Generated recipe saved to your recipe box.")
     return redirect(url_for("recipe_detail", recipe_id=recipe_id))
+SYNC_TEMPLATE = """
+{% extends "base" %}
+{% block content %}
+<section class="sync-dashboard" aria-labelledby="sync-title">
+  <div class="panel">
+    <p class="eyebrow">Connected kitchens</p>
+    <h2 id="sync-title">Recipe Box sync</h2>
+    <p class="summary">Connect another Recipe Box on your LAN or private network. Sync is manual, previewed, and never deletes local cards.</p>
+    <div class="status-note" role="note">Your sync token stays outside the interface. Share it only with a trusted Recipe Box operator.</div>
+  </div>
+  <div class="panel">
+    <h3>Add a trusted peer</h3>
+    <form method="post" action="{{ url_for('add_sync_peer') }}">
+      <label>Peer name<input name="name" required maxlength="80" placeholder="Kitchen Pi"></label>
+      <label>Peer URL<input name="url" type="url" required maxlength="500" placeholder="http://kitchen-pi:5000"></label>
+      <label>Shared token<input name="token" type="password" required maxlength="500" autocomplete="new-password"></label>
+      <button type="submit">Add peer</button>
+    </form>
+  </div>
+  <div class="sync-grid">
+    <div>
+      <h3>Connected Recipe Boxes</h3>
+      {% for peer in peers %}
+      <article class="peer-card">
+        <div class="recipe-head"><div><h3>{{ peer.name }}</h3><p class="small">{{ peer.url }}</p></div><span class="status-badge {{ 'ok' if peer.enabled else 'muted' }}">{{ 'Enabled' if peer.enabled else 'Disabled' }}</span></div>
+        <p class="small">Last sync: {{ peer.last_sync_at or 'Not yet synced' }}</p>
+        <div class="actions">
+          <form method="post" action="{{ url_for('preview_sync_peer', peer_id=peer.id) }}"><button class="secondary" type="submit">Preview changes</button></form>
+          <form method="post" action="{{ url_for('run_sync_peer', peer_id=peer.id) }}"><button class="green" type="submit">Sync now</button></form>
+          <form method="post" action="{{ url_for('toggle_sync_peer', peer_id=peer.id) }}"><button class="secondary" type="submit">{{ 'Disable' if peer.enabled else 'Enable' }}</button></form>
+          <form method="post" action="{{ url_for('delete_sync_peer', peer_id=peer.id) }}"><button class="secondary" type="submit">Remove</button></form>
+        </div>
+      </article>
+      {% else %}<div class="empty">No peers yet. Add another trusted Recipe Box to begin.</div>{% endfor %}
+    </div>
+    <aside>
+      <section class="panel"><h3>Recent synchronization</h3>{% for item in history %}<p class="small"><strong>{{ item.status }}</strong> · {{ item.started_at }}<br>{{ item.summary_label }}</p>{% else %}<p class="small">Sync results will appear here.</p>{% endfor %}</section>
+      {% if preview %}<section class="panel" aria-labelledby="preview-title"><h3 id="preview-title">Preview: {{ preview.peer_name }}</h3><p class="small">New {{ preview.counts.new }} · Updated {{ preview.counts.update }} · Unchanged {{ preview.counts.unchanged }} · Conflicts {{ preview.counts.conflict }} · Failures {{ preview.counts.failure }}</p>{% for item in preview.items %}<div class="preview-row"><strong>{{ item.status }}</strong> · {{ item.recipe.title }}</div>{% endfor %}</section>{% endif %}
+      {% if conflicts %}<section class="panel" aria-labelledby="conflict-title"><h3 id="conflict-title">Conflicts needing a decision</h3>{% for conflict in conflicts %}<div class="conflict-row"><strong>{{ conflict.recipe_id }}</strong><div class="actions"><form method="post" action="{{ url_for('resolve_sync_conflict', conflict_id=conflict.id) }}"><input type="hidden" name="resolution" value="keep_local"><button class="secondary" type="submit">Keep local</button></form><form method="post" action="{{ url_for('resolve_sync_conflict', conflict_id=conflict.id) }}"><input type="hidden" name="resolution" value="use_remote"><button type="submit">Use remote</button></form><form method="post" action="{{ url_for('resolve_sync_conflict', conflict_id=conflict.id) }}"><input type="hidden" name="resolution" value="keep_both"><button class="green" type="submit">Keep both</button></form></div></div>{% endfor %}</section>{% endif %}
+    </aside>
+  </div>
+</section>
+{% endblock %}
+"""
+
+
+def sync_installation_id() -> str:
+    init_db()
+    with db_connect() as conn:
+        return conn.execute("SELECT id FROM installations LIMIT 1").fetchone()["id"]
+
+
+def sync_json_error(code: str, message: str, status: int):
+    return jsonify({"error": {"code": code, "message": message}}), status
+
+
+def local_session_user():
+    data = load_data()
+    return current_user(data)
+
+
+def require_local_json_auth():
+    if not local_session_user():
+        return sync_json_error("AUTHENTICATION_REQUIRED", "Sign in before using synchronization.", 401)
+    return None
+
+
+def require_peer_auth():
+    authorization = request.headers.get("Authorization", "")
+    token = authorization[7:].strip() if authorization.lower().startswith("bearer ") else ""
+    init_db()
+    with db_connect() as conn:
+        row = conn.execute("SELECT token_hash FROM installations LIMIT 1").fetchone()
+    if not row or not token_matches(token, row["token_hash"]):
+        return sync_json_error("AUTHENTICATION_FAILED", "A valid sync token is required.", 401)
+    return None
+
+
+def sync_recipe_payload(row: sqlite3.Row | dict) -> dict:
+    recipe = {
+        "id": row["id"], "title": row["title"], "summary": row["summary"],
+        "prep_time": row["prep_time"], "servings": row["servings"],
+        "ingredients": json.loads(row["ingredients_json"]), "steps": json.loads(row["steps_json"]),
+        "created_at": row["created_at"], "updated_at": row["updated_at"],
+    }
+    recipe = validate_recipe_payload(recipe)
+    recipe["checksum"] = recipe_checksum(recipe)
+    return recipe
+
+
+def valid_peer_url(value: str) -> bool:
+    parsed = urlparse(value.strip())
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc) and not parsed.username and not parsed.password and not parsed.fragment
+
+
+def get_sync_peer(peer_id: str):
+    with db_connect() as conn:
+        return conn.execute("SELECT * FROM sync_peers WHERE id = ?", (peer_id,)).fetchone()
+
+
+def fetch_peer_manifest(peer: sqlite3.Row) -> dict:
+    since = f"?{urlencode({'since': peer['last_sync_at']})}" if peer["last_sync_at"] else ""
+    endpoint = urljoin(peer["url"].rstrip("/") + "/", "api/sync/manifest") + since
+    if not valid_peer_url(endpoint):
+        raise ValueError("Peer URL must be an HTTP or HTTPS URL without credentials.")
+    request_obj = Request(endpoint, headers={"Authorization": f"Bearer {peer['token']}", "Accept": "application/json"})
+    try:
+        with urlopen(request_obj, timeout=app.config["SYNC_TIMEOUT_SECONDS"]) as response:
+            body = response.read(MAX_SYNC_BODY_BYTES + 1)
+    except HTTPError as exc:
+        raise RuntimeError(f"Peer returned HTTP {exc.code}.") from exc
+    except (URLError, TimeoutError) as exc:
+        raise RuntimeError("Peer did not respond before the timeout.") from exc
+    if len(body) > MAX_SYNC_BODY_BYTES:
+        raise RuntimeError("Peer response exceeded the synchronization size limit.")
+    try:
+        manifest = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("Peer returned malformed JSON.") from exc
+    if not isinstance(manifest, dict) or not isinstance(manifest.get("recipes"), list) or len(manifest["recipes"]) > 500:
+        raise RuntimeError("Peer returned an invalid recipe manifest.")
+    manifest["recipes"] = [validate_recipe_payload(item) for item in manifest["recipes"]]
+    return manifest
+
+
+def preview_peer_changes(peer_id: str) -> dict:
+    peer = get_sync_peer(peer_id)
+    if not peer or not peer["enabled"]:
+        raise ValueError("That peer is missing or disabled.")
+    manifest = fetch_peer_manifest(peer)
+    items = []
+    with db_connect() as conn:
+        for remote in manifest["recipes"]:
+            row = conn.execute("SELECT * FROM recipes WHERE id = ?", (remote["id"],)).fetchone()
+            local = sync_recipe_payload(row) if row else None
+            baseline = conn.execute("SELECT checksum FROM sync_baselines WHERE peer_id = ? AND recipe_id = ?", (peer_id, remote["id"])).fetchone()
+            status = classify_merge(local, remote, baseline["checksum"] if baseline else None)
+            items.append({"status": status, "recipe": remote, "local": local})
+    counts = {name: sum(item["status"] == name for item in items) for name in ("new", "update", "unchanged", "conflict")}
+    counts["failure"] = 0
+    return {"peer_id": peer_id, "peer_name": peer["name"], "source_installation_id": manifest.get("installation_id", "unknown"), "items": items, "counts": counts}
+
+
+@app.route("/api/sync/manifest")
+def sync_manifest():
+    auth_error = require_peer_auth()
+    if auth_error:
+        return auth_error
+    if request.content_length and request.content_length > MAX_SYNC_BODY_BYTES:
+        return sync_json_error("PAYLOAD_TOO_LARGE", "The request is too large.", 413)
+    since = request.args.get("since", "").strip()
+    init_db()
+    with db_connect() as conn:
+        rows = conn.execute("SELECT * FROM recipes ORDER BY updated_at DESC LIMIT 500").fetchall()
+        recipes = []
+        for row in rows:
+            if since and row["updated_at"] <= since:
+                continue
+            recipes.append(sync_recipe_payload(row))
+    return jsonify({"installation_id": sync_installation_id(), "recipes": recipes})
+
+
+@app.route("/api/sync/recipes/<recipe_id>")
+def sync_recipe(recipe_id):
+    auth_error = require_peer_auth()
+    if auth_error:
+        return auth_error
+    with db_connect() as conn:
+        row = conn.execute("SELECT * FROM recipes WHERE id = ?", (recipe_id,)).fetchone()
+    if not row:
+        return sync_json_error("NOT_FOUND", "Recipe not found.", 404)
+    return jsonify(sync_recipe_payload(row))
+
+
+@app.route("/sync")
+def sync_dashboard():
+    data = load_data()
+    user = current_user(data)
+    if not user:
+        return redirect(url_for("signup"))
+    with db_connect() as conn:
+        peers = [dict(row) for row in conn.execute("SELECT id, name, url, enabled, last_sync_at FROM sync_peers ORDER BY name")]
+        history = []
+        for row in conn.execute("SELECT status, started_at, summary_json FROM sync_history ORDER BY started_at DESC LIMIT 6"):
+            summary = json.loads(row["summary_json"])
+            history.append({**dict(row), "summary_label": f"{summary.get('new', 0)} new · {summary.get('update', 0)} updated · {summary.get('unchanged', 0)} unchanged · {summary.get('conflict', 0)} conflicts · {summary.get('imported', 0)} imported"})
+        conflicts = [dict(row) for row in conn.execute("SELECT id, recipe_id FROM sync_conflicts WHERE status = 'open' ORDER BY created_at")]
+    return render_template_string(SYNC_TEMPLATE, title=APP_TITLE, user=user, peers=peers, history=history, conflicts=conflicts, preview=session.pop("sync_preview", None), active="sync")
+
+
+@app.route("/sync/peers", methods=["POST"])
+def add_sync_peer():
+    data = load_data(); user = current_user(data)
+    if not user: return redirect(url_for("signup"))
+    name, url, token = request.form.get("name", "").strip(), request.form.get("url", "").strip().rstrip("/"), request.form.get("token", "").strip()
+    if not name or len(name) > 80 or not valid_peer_url(url) or not token or len(token) > 500:
+        flash("Enter a peer name, a valid HTTP(S) URL, and its shared token.", "error")
+        return redirect(url_for("sync_dashboard"))
+    with db_connect() as conn:
+        conn.execute("INSERT INTO sync_peers (id, name, url, token, created_at) VALUES (?, ?, ?, ?, ?)", (f"peer-{uuid.uuid4().hex}", name, url, token, now_iso()))
+    flash("Trusted peer added.")
+    return redirect(url_for("sync_dashboard"))
+
+
+@app.route("/sync/peers/<peer_id>/toggle", methods=["POST"])
+def toggle_sync_peer(peer_id):
+    if not local_session_user(): return redirect(url_for("signup"))
+    with db_connect() as conn: conn.execute("UPDATE sync_peers SET enabled = CASE enabled WHEN 1 THEN 0 ELSE 1 END WHERE id = ?", (peer_id,))
+    return redirect(url_for("sync_dashboard"))
+
+
+@app.route("/sync/peers/<peer_id>/delete", methods=["POST"])
+def delete_sync_peer(peer_id):
+    if not local_session_user(): return redirect(url_for("signup"))
+    with db_connect() as conn: conn.execute("DELETE FROM sync_peers WHERE id = ?", (peer_id,))
+    flash("Peer removed.")
+    return redirect(url_for("sync_dashboard"))
+
+
+@app.route("/api/sync/preview", methods=["POST"])
+def api_sync_preview():
+    auth_error = require_local_json_auth()
+    if auth_error: return auth_error
+    data = request.get_json(silent=True) or {}
+    try: return jsonify(preview_peer_changes(str(data["peer_id"])))
+    except KeyError: return sync_json_error("VALIDATION_ERROR", "peer_id is required.", 422)
+    except (ValueError, RuntimeError) as exc: return sync_json_error("SYNC_FAILED", str(exc), 502)
+
+
+@app.route("/sync/peers/<peer_id>/preview", methods=["POST"])
+def preview_sync_peer(peer_id):
+    if not local_session_user(): return redirect(url_for("signup"))
+    try: session["sync_preview"] = preview_peer_changes(peer_id); flash("Preview ready. Review the counts before syncing.")
+    except (ValueError, RuntimeError) as exc: flash(str(exc), "error")
+    return redirect(url_for("sync_dashboard"))
+
+
+@app.route("/api/sync/run", methods=["POST"])
+def api_sync_run():
+    auth_error = require_local_json_auth()
+    if auth_error: return auth_error
+    data = request.get_json(silent=True) or {}
+    try: return jsonify(run_peer_sync(str(data["peer_id"])))
+    except KeyError: return sync_json_error("VALIDATION_ERROR", "peer_id is required.", 422)
+    except (ValueError, RuntimeError) as exc: return sync_json_error("SYNC_FAILED", str(exc), 502)
+
+
+def run_peer_sync(peer_id: str) -> dict:
+    preview = preview_peer_changes(peer_id)
+    peer = get_sync_peer(peer_id)
+    started = now_iso(); history_id = f"sync-{uuid.uuid4().hex}"
+    imported = 0; conflicts = 0
+    try:
+        with db_connect() as conn:
+            owner = conn.execute("SELECT id FROM users ORDER BY created_at LIMIT 1").fetchone()
+            if not owner: raise ValueError("Create a local account before importing recipes.")
+            for item in preview["items"]:
+                remote = item["recipe"]; status = item["status"]
+                if status == "new":
+                    conn.execute("INSERT INTO recipes (id, owner_id, title, summary, prep_time, servings, ingredients_json, steps_json, created_at, updated_at, sync_source_installation_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (remote["id"], owner["id"], remote["title"], remote["summary"], remote["prep_time"], remote["servings"], json.dumps(remote["ingredients"]), json.dumps(remote["steps"]), remote["created_at"], remote["updated_at"], preview["source_installation_id"])); imported += 1
+                elif status == "update":
+                    conn.execute("UPDATE recipes SET title=?, summary=?, prep_time=?, servings=?, ingredients_json=?, steps_json=?, updated_at=?, sync_source_installation_id=? WHERE id=?", (remote["title"], remote["summary"], remote["prep_time"], remote["servings"], json.dumps(remote["ingredients"]), json.dumps(remote["steps"]), remote["updated_at"], preview["source_installation_id"], remote["id"])); imported += 1
+                elif status == "conflict":
+                    existing_conflict = conn.execute("SELECT id FROM sync_conflicts WHERE peer_id = ? AND recipe_id = ? AND status = 'open'", (peer_id, remote["id"])).fetchone()
+                    if not existing_conflict:
+                        conn.execute("INSERT INTO sync_conflicts (id, peer_id, recipe_id, local_json, remote_json, status, created_at) VALUES (?, ?, ?, ?, ?, 'open', ?)", (f"conflict-{uuid.uuid4().hex}", peer_id, remote["id"], json.dumps(item["local"]), json.dumps(remote), now_iso()))
+                    conflicts += 1
+                conn.execute("INSERT INTO sync_baselines (peer_id, recipe_id, checksum, remote_updated_at, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(peer_id, recipe_id) DO UPDATE SET checksum=excluded.checksum, remote_updated_at=excluded.remote_updated_at, updated_at=excluded.updated_at", (peer_id, remote["id"], recipe_checksum(remote), remote["updated_at"], now_iso()))
+            summary = dict(preview["counts"]); summary["imported"] = imported
+            conn.execute("UPDATE sync_peers SET last_sync_at = ? WHERE id = ?", (now_iso(), peer_id))
+            conn.execute("INSERT INTO sync_history (id, peer_id, started_at, finished_at, status, summary_json) VALUES (?, ?, ?, ?, ?, ?)", (history_id, peer_id, started, now_iso(), "conflict" if conflicts else "success", json.dumps(summary, sort_keys=True)))
+        return {"status": "conflict" if conflicts else "success", "summary": summary}
+    except Exception:
+        with db_connect() as conn: conn.execute("INSERT INTO sync_history (id, peer_id, started_at, finished_at, status, summary_json) VALUES (?, ?, ?, ?, 'failure', ?)", (history_id, peer_id, started, now_iso(), json.dumps({"error": "sync failed"})))
+        raise
+
+
+@app.route("/sync/peers/<peer_id>/run", methods=["POST"])
+def run_sync_peer(peer_id):
+    if not local_session_user(): return redirect(url_for("signup"))
+    try:
+        result = run_peer_sync(peer_id); flash(f"Sync complete: {result['summary']['imported']} imported, {result['summary']['conflict']} conflicts.", "error" if result["status"] == "conflict" else "")
+    except (ValueError, RuntimeError) as exc: flash(str(exc), "error")
+    return redirect(url_for("sync_dashboard"))
+
+
+@app.route("/api/sync/conflicts/<conflict_id>/resolve", methods=["POST"])
+def api_resolve_sync_conflict(conflict_id):
+    auth_error = require_local_json_auth()
+    if auth_error: return auth_error
+    try: return jsonify(resolve_sync_conflict_action(conflict_id, (request.get_json(silent=True) or {}).get("resolution", "")))
+    except ValueError as exc: return sync_json_error("VALIDATION_ERROR", str(exc), 422)
+
+
+def resolve_sync_conflict_action(conflict_id: str, resolution: str) -> dict:
+    if resolution not in {"keep_local", "use_remote", "keep_both"}: raise ValueError("resolution must be keep_local, use_remote, or keep_both")
+    with db_connect() as conn:
+        conflict = conn.execute("SELECT * FROM sync_conflicts WHERE id = ? AND status = 'open'", (conflict_id,)).fetchone()
+        if not conflict: raise ValueError("Conflict not found or already resolved.")
+        local, remote = json.loads(conflict["local_json"]), json.loads(conflict["remote_json"])
+        if resolution == "use_remote":
+            conn.execute("UPDATE recipes SET title=?, summary=?, prep_time=?, servings=?, ingredients_json=?, steps_json=?, updated_at=? WHERE id=?", (remote["title"], remote["summary"], remote["prep_time"], remote["servings"], json.dumps(remote["ingredients"]), json.dumps(remote["steps"]), remote["updated_at"], remote["id"]))
+        elif resolution == "keep_both":
+            copy = make_keep_both_copy(remote)
+            owner = conn.execute("SELECT owner_id FROM recipes WHERE id = ?", (local["id"],)).fetchone()["owner_id"]
+            conn.execute("INSERT INTO recipes (id, owner_id, title, summary, prep_time, servings, ingredients_json, steps_json, created_at, updated_at, sync_source_installation_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'remote')", (copy["id"], owner, copy["title"], copy["summary"], copy["prep_time"], copy["servings"], json.dumps(copy["ingredients"]), json.dumps(copy["steps"]), copy["created_at"], copy["updated_at"]))
+        conn.execute("UPDATE sync_conflicts SET status = 'resolved', resolved_at = ? WHERE id = ?", (now_iso(), conflict_id))
+    return {"status": "resolved", "resolution": resolution}
+
+
+@app.route("/sync/conflicts/<conflict_id>/resolve", methods=["POST"])
+def resolve_sync_conflict(conflict_id):
+    if not local_session_user(): return redirect(url_for("signup"))
+    try: resolve_sync_conflict_action(conflict_id, request.form.get("resolution", "")); flash("Conflict resolved.")
+    except ValueError as exc: flash(str(exc), "error")
+    return redirect(url_for("sync_dashboard"))
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
