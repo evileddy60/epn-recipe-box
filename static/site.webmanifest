@@ -1,0 +1,20 @@
+{
+  "name": "EPN Recipe Box",
+  "short_name": "Recipe Box",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#121d3a",
+  "theme_color": "#ad6930",
+  "icons": [
+    {
+      "src": "/static/android-chrome-192x192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/static/android-chrome-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}
