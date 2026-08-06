@@ -14,6 +14,7 @@ from . import config as _config
 from .config import *
 from .db import *
 from .security import login_allowed, login_retry_after, record_login_failure, record_login_success
+from .policies import can_delete_comment, can_edit_comment, can_hide_comment, can_unhide_comment
 
 
 bp = Blueprint("api_v1", __name__, url_prefix="/api/v1")
@@ -497,13 +498,11 @@ def api_comments(recipe_id):
             ).fetchall()
             return jsonify({"data": [dict(r) for r in rows]})
         try:
-            create_comment(recipe_id, g.api_user["id"], (_json_body() or {}).get("body", ""))
+            comment_id = create_comment(recipe_id, g.api_user["id"], (_json_body() or {}).get("body", ""))
         except (ValueError, TypeError) as exc:
             return _error("VALIDATION_ERROR", str(exc), 422)
-        row = conn.execute(
-            "SELECT * FROM comments WHERE recipe_id=? AND user_id=? ORDER BY created_at DESC LIMIT 1", (recipe_id, g.api_user["id"])
-        ).fetchone()
-        _event(conn, "comment_added", recipe_id)
+        row = conn.execute("SELECT * FROM comments WHERE id=?", (comment_id,)).fetchone()
+        _event(conn, "comment_added", recipe_id, {"comment_id": comment_id})
         return jsonify(dict(row)), 201
 
 
@@ -512,21 +511,70 @@ def api_comments(recipe_id):
 def api_comment(comment_id):
     with db_connect() as conn:
         row = conn.execute(
-            "SELECT c.*, r.owner_id AS recipe_owner FROM comments c JOIN recipes r ON r.id=c.recipe_id WHERE c.id=?", (comment_id,)
+            "SELECT c.*, r.owner_id AS recipe_owner, r.visibility FROM comments c JOIN recipes r ON r.id=c.recipe_id WHERE c.id=?",
+            (comment_id,),
         ).fetchone()
         if not row:
             return _error("NOT_FOUND", "Comment not found.", 404)
+        recipe = {"owner_id": row["recipe_owner"], "visibility": row["visibility"]}
+        comment = dict(row)
         if request.method == "PATCH":
-            if row["user_id"] != g.api_user["id"]:
+            if not can_edit_comment(comment, recipe, g.api_user["id"]):
                 return _error("FORBIDDEN", "Only the author can edit this comment.", 403)
             body = (_json_body() or {}).get("body", "")
             if not isinstance(body, str) or not body.strip() or len(body.strip()) > MAX_COMMENT_LENGTH:
                 return _error("VALIDATION_ERROR", "Comment length is invalid.", 422)
             conn.execute("UPDATE comments SET body=?, updated_at=? WHERE id=?", (body.strip(), _now_iso(), comment_id))
             return jsonify(dict(conn.execute("SELECT * FROM comments WHERE id=?", (comment_id,)).fetchone()))
-        if row["user_id"] != g.api_user["id"] and row["recipe_owner"] != g.api_user["id"]:
-            return _error("FORBIDDEN", "Only the author or owner can delete this comment.", 403)
-        conn.execute("UPDATE comments SET deleted_at=? WHERE id=?", (_now_iso(), comment_id))
+        if not can_delete_comment(comment, recipe, g.api_user["id"]):
+            return _error("FORBIDDEN", "Only the comment author can delete this comment.", 403)
+        conn.execute("UPDATE comments SET deleted_at=?, updated_at=? WHERE id=?", (_now_iso(), _now_iso(), comment_id))
+    return ("", 204)
+
+
+def _comment_moderation_row(conn, comment_id: str):
+    return conn.execute(
+        "SELECT c.*, r.owner_id AS recipe_owner, r.visibility FROM comments c JOIN recipes r ON r.id=c.recipe_id WHERE c.id=? AND (r.owner_id=? OR r.visibility='shared_epn')",
+        (comment_id, g.api_user["id"]),
+    ).fetchone()
+
+
+@bp.route("/comments/<comment_id>/hide", methods=["POST"])
+@_require_token
+def api_hide_comment(comment_id: str):
+    with db_connect() as conn:
+        row = _comment_moderation_row(conn, comment_id)
+        if not row:
+            return _error("NOT_FOUND", "Comment not found.", 404)
+        recipe = {"owner_id": row["recipe_owner"], "visibility": row["visibility"]}
+        if row["hidden_at"]:
+            if row["recipe_owner"] == g.api_user["id"]:
+                return ("", 204)
+            return _error("FORBIDDEN", "Only the recipe owner can hide this comment.", 403)
+        if not can_hide_comment(dict(row), recipe, g.api_user["id"]):
+            return _error("FORBIDDEN", "Only the recipe owner can hide this comment.", 403)
+        stamp = _now_iso()
+        conn.execute(
+            "UPDATE comments SET hidden_at=?, hidden_by_user_id=?, updated_at=? WHERE id=?", (stamp, g.api_user["id"], stamp, comment_id)
+        )
+    return ("", 204)
+
+
+@bp.route("/comments/<comment_id>/unhide", methods=["POST"])
+@_require_token
+def api_unhide_comment(comment_id: str):
+    with db_connect() as conn:
+        row = _comment_moderation_row(conn, comment_id)
+        if not row:
+            return _error("NOT_FOUND", "Comment not found.", 404)
+        recipe = {"owner_id": row["recipe_owner"], "visibility": row["visibility"]}
+        if not row["hidden_at"]:
+            if row["recipe_owner"] == g.api_user["id"]:
+                return ("", 204)
+            return _error("FORBIDDEN", "Only the recipe owner can unhide this comment.", 403)
+        if not can_unhide_comment(dict(row), recipe, g.api_user["id"]):
+            return _error("FORBIDDEN", "Only the recipe owner can unhide this comment.", 403)
+        conn.execute("UPDATE comments SET hidden_at=NULL, hidden_by_user_id=NULL, updated_at=? WHERE id=?", (_now_iso(), comment_id))
     return ("", 204)
 
 
@@ -538,11 +586,11 @@ def api_activity():
     offset = (page - 1) * page_size
     with db_connect() as conn:
         total = conn.execute(
-            "SELECT COUNT(*) FROM activity_events e LEFT JOIN recipes r ON r.id=e.recipe_id WHERE e.recipe_id IS NULL OR r.visibility='shared_epn' OR r.owner_id=?",
+            "SELECT COUNT(*) FROM activity_events e LEFT JOIN recipes r ON r.id=e.recipe_id WHERE (e.recipe_id IS NULL OR r.visibility='shared_epn' OR r.owner_id=?) AND NOT (e.event_type='comment_added' AND EXISTS (SELECT 1 FROM comments c WHERE c.id=json_extract(e.payload_json, '$.comment_id') AND (c.deleted_at IS NOT NULL OR c.hidden_at IS NOT NULL)))",
             (g.api_user["id"],),
         ).fetchone()[0]
         rows = conn.execute(
-            "SELECT e.* FROM activity_events e LEFT JOIN recipes r ON r.id=e.recipe_id WHERE e.recipe_id IS NULL OR r.visibility='shared_epn' OR r.owner_id=? ORDER BY e.created_at DESC LIMIT ? OFFSET ?",
+            "SELECT e.* FROM activity_events e LEFT JOIN recipes r ON r.id=e.recipe_id WHERE (e.recipe_id IS NULL OR r.visibility='shared_epn' OR r.owner_id=?) AND NOT (e.event_type='comment_added' AND EXISTS (SELECT 1 FROM comments c WHERE c.id=json_extract(e.payload_json, '$.comment_id') AND (c.deleted_at IS NOT NULL OR c.hidden_at IS NOT NULL))) ORDER BY e.created_at DESC LIMIT ? OFFSET ?",
             (g.api_user["id"], page_size, offset),
         ).fetchall()
         return jsonify(

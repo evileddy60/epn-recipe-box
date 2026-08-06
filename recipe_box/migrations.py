@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 # Compact fixtures represent the three schemas that have existed in the project.
 HISTORICAL_SCHEMAS = {
@@ -257,6 +257,13 @@ def _migration_13(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE collections ADD COLUMN visibility TEXT NOT NULL DEFAULT 'private'")
 
 
+def _migration_14(conn: sqlite3.Connection) -> None:
+    comment_columns = _columns(conn, "comments")
+    if "hidden_by_user_id" not in comment_columns:
+        conn.execute("ALTER TABLE comments ADD COLUMN hidden_by_user_id TEXT REFERENCES users(id) ON DELETE SET NULL")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_comments_hidden_by ON comments(hidden_by_user_id)")
+
+
 def _ordered_migrations() -> tuple[Migration, ...]:
     return (
         (1, _migration_1),
@@ -272,6 +279,7 @@ def _ordered_migrations() -> tuple[Migration, ...]:
         (11, _migration_11),
         (12, _migration_12),
         (13, _migration_13),
+        (14, _migration_14),
     )
 
 

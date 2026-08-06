@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="workspace">
+  <div class="recipe-box">
+    <p class="box-label">Comment</p>
+    <h2>Edit comment</h2>
+    <form method="post" action="{{ url_for('edit_comment', comment_id=comment.id) }}">
+      {{ csrf_input() }}
+      <label for="body">Comment text
+        <textarea id="body" name="body" maxlength="2000" required>{{ comment.body }}</textarea>
+      </label>
+      <button type="submit">Save comment</button>
+      <a class="button secondary" href="{{ url_for('recipe_detail', recipe_id=comment.recipe_id) }}">Cancel</a>
+    </form>
+  </div>
+</section>
+{% endblock %}

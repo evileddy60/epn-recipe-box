@@ -427,9 +427,20 @@ def load_data(
         for row in conn.execute("SELECT recipe_id, user_id, score FROM ratings"):
             ratings_by_recipe.setdefault(row["recipe_id"], []).append({"user_id": row["user_id"], "score": row["score"]})
         comments_by_recipe = {}
-        for row in conn.execute("SELECT id, recipe_id, user_id, body, created_at FROM comments ORDER BY created_at"):
+        for row in conn.execute(
+            "SELECT id, recipe_id, user_id, body, created_at, updated_at, deleted_at, hidden_at, hidden_by_user_id FROM comments WHERE deleted_at IS NULL AND hidden_at IS NULL ORDER BY created_at"
+        ):
             comments_by_recipe.setdefault(row["recipe_id"], []).append(
-                {"id": row["id"], "user_id": row["user_id"], "body": row["body"], "created_at": row["created_at"]}
+                {
+                    "id": row["id"],
+                    "user_id": row["user_id"],
+                    "body": row["body"],
+                    "created_at": row["created_at"],
+                    "updated_at": row["updated_at"],
+                    "deleted_at": row["deleted_at"],
+                    "hidden_at": row["hidden_at"],
+                    "hidden_by_user_id": row["hidden_by_user_id"],
+                }
             )
         favorite_ids = set()
         archived_ids = set()
@@ -822,18 +833,59 @@ def save_rating(recipe_id: str, user_id: str, score: int) -> None:
         )
 
 
-def create_comment(recipe_id: str, user_id: str, body: str) -> None:
+def create_comment(recipe_id: str, user_id: str, body: str) -> str:
     body = body.strip()
     if not body or len(body) > MAX_COMMENT_LENGTH:
         raise ValueError("Comments must be between 1 and 2,000 characters.")
+    comment_id = f"c-{uuid.uuid4().hex[:10]}"
     with db_connect() as conn:
         conn.execute(
             """
             INSERT INTO comments (id, recipe_id, user_id, body, created_at)
             VALUES (?, ?, ?, ?, ?)
             """,
-            (f"c-{uuid.uuid4().hex[:10]}", recipe_id, user_id, body, now_iso()),
+            (comment_id, recipe_id, user_id, body, now_iso()),
         )
+    return comment_id
+
+
+def list_comments(recipe_id: str, viewer_id: str | None, include_hidden: bool = False) -> list[dict]:
+    with db_connect() as conn:
+        recipe = conn.execute("SELECT id, owner_id, visibility FROM recipes WHERE id = ?", (recipe_id,)).fetchone()
+        if not recipe or not viewer_id or (recipe["owner_id"] != viewer_id and recipe["visibility"] != "shared_epn"):
+            return []
+        query = "SELECT * FROM comments WHERE recipe_id = ? AND deleted_at IS NULL"
+        if not include_hidden or recipe["owner_id"] != viewer_id:
+            query += " AND hidden_at IS NULL"
+        query += " ORDER BY created_at"
+        return [dict(row) for row in conn.execute(query, (recipe_id,))]
+
+
+def update_comment(comment_id: str, body: str) -> None:
+    body = body.strip()
+    if not body or len(body) > MAX_COMMENT_LENGTH:
+        raise ValueError("Comments must be between 1 and 2,000 characters.")
+    with db_connect() as conn:
+        conn.execute("UPDATE comments SET body = ?, updated_at = ? WHERE id = ?", (body, now_iso(), comment_id))
+
+
+def delete_comment(comment_id: str) -> None:
+    with db_connect() as conn:
+        stamp = now_iso()
+        conn.execute("UPDATE comments SET deleted_at = ?, updated_at = ? WHERE id = ?", (stamp, stamp, comment_id))
+
+
+def hide_comment(comment_id: str, user_id: str) -> None:
+    with db_connect() as conn:
+        stamp = now_iso()
+        conn.execute(
+            "UPDATE comments SET hidden_at = ?, hidden_by_user_id = ?, updated_at = ? WHERE id = ?", (stamp, user_id, stamp, comment_id)
+        )
+
+
+def unhide_comment(comment_id: str) -> None:
+    with db_connect() as conn:
+        conn.execute("UPDATE comments SET hidden_at = NULL, hidden_by_user_id = NULL, updated_at = ? WHERE id = ?", (now_iso(), comment_id))
 
 
 def current_user(data: dict) -> dict | None:

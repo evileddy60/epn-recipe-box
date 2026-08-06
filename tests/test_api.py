@@ -190,7 +190,8 @@ class ApiFoundationTests(unittest.TestCase):
         )
         feed = self.client.get("/api/v1/activity", headers={"Authorization": f"Bearer {token}"})
         self.assertEqual(feed.status_code, 200)
-        self.assertGreaterEqual(len(feed.get_json()["data"]), 4)
+        self.assertGreaterEqual(len(feed.get_json()["data"]), 3)
+        self.assertNotIn("comment_added", {item["event_type"] for item in feed.get_json()["data"]})
 
 
 if __name__ == "__main__":

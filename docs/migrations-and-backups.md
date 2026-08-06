@@ -12,7 +12,7 @@ recipe_box.db.pre-sync-YYYYMMDDTHHMMSSZ.bak
 
 The original legacy schema (including `users.name`), synchronization schema, and categories/tags schema are covered by tests. Existing rows and relationships are retained; missing category values remain uncategorized and missing tags remain empty.
 
-The current schema version adds recipe image metadata and local archive state, followed by the user-local favorites table. Existing recipes receive empty image metadata and a null archive timestamp; no row is deleted.
+The current schema version adds recipe image metadata and local archive state, followed by the user-local favorites table and explicit comment moderation audit fields. Existing recipes and comments receive empty image metadata, null archive timestamps, and null moderation fields; no row is deleted. Recipe-owner hiding is recorded separately from author deletion.
 
 Startup calls the runner on every initialization. If no pending version exists, no migration is repeated.
 ## Backup tool

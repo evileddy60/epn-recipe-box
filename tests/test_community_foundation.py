@@ -19,14 +19,14 @@ class CommunityMigrationTests(unittest.TestCase):
             with sqlite3.connect(path) as seeded:
                 seeded.execute("INSERT INTO favorites VALUES ('legacy-user','r1','now')")
                 seeded.commit()
-            self.assertEqual(migrations.migrate_database(path), 13)
+            self.assertEqual(migrations.migrate_database(path), migrations.SCHEMA_VERSION)
             with sqlite3.connect(path) as check:
                 tables = {r[0] for r in check.execute("SELECT name FROM sqlite_master WHERE type='table'")}
                 self.assertTrue({"recipe_user_state", "collections", "collection_recipes", "activity_events"} <= tables)
                 cols = {r[1] for r in check.execute("PRAGMA table_info(recipes)")}
                 self.assertIn("visibility", cols)
                 comment_cols = {r[1] for r in check.execute("PRAGMA table_info(comments)")}
-                self.assertTrue({"updated_at", "deleted_at", "hidden_at"} <= comment_cols)
+                self.assertTrue({"updated_at", "deleted_at", "hidden_at", "hidden_by_user_id"} <= comment_cols)
                 state = check.execute("SELECT is_favorite, is_archived FROM recipe_user_state").fetchone()
                 self.assertEqual(tuple(state), (1, 0))
 
@@ -68,10 +68,12 @@ class CommunityMigrationTests(unittest.TestCase):
                 for table, columns in expected.items():
                     self.assertTrue(columns <= {row[1] for row in conn.execute(f"PRAGMA table_info({table})")})
                 self.assertEqual(
-                    {"updated_at", "deleted_at", "hidden_at"} <= {row[1] for row in conn.execute("PRAGMA table_info(comments)")}, True
+                    {"updated_at", "deleted_at", "hidden_at", "hidden_by_user_id"}
+                    <= {row[1] for row in conn.execute("PRAGMA table_info(comments)")},
+                    True,
                 )
                 self.assertEqual(conn.execute("SELECT visibility FROM recipes WHERE id = 'r1'").fetchone(), None)
-            self.assertEqual(migrations.migrate_database(path), 13)
+            self.assertEqual(migrations.migrate_database(path), migrations.SCHEMA_VERSION)
 
     def test_community_migration_failure_rolls_back_schema_and_data(self):
         from recipe_box import migrations

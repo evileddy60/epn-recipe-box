@@ -57,8 +57,22 @@
       {% for comment in recipe.comments %}
         <div class="comment">
           <strong>{{ comment.user.name }}</strong>
+          {% if comment.hidden_at %}<span class="badge">Hidden by recipe owner</span>{% endif %}
           <p>{{ comment.body }}</p>
           <div class="small">{{ comment.created_at[:10] }}</div>
+          {% if user and user.id == comment.user_id and not comment.hidden_at %}
+            <div class="actions">
+              <a class="button secondary" href="{{ url_for('edit_comment', comment_id=comment.id) }}">Edit comment</a>
+              <form method="post" action="{{ url_for('delete_comment_browser', comment_id=comment.id) }}">{{ csrf_input() }}<button class="secondary" type="submit">Delete comment</button></form>
+            </div>
+          {% endif %}
+          {% if user and user.id == recipe.owner_id and comment.user_id != user.id and not comment.deleted_at %}
+            {% if comment.hidden_at %}
+              <form method="post" action="{{ url_for('unhide_comment_browser', comment_id=comment.id) }}">{{ csrf_input() }}<button class="green" type="submit">Unhide comment</button></form>
+            {% else %}
+              <form method="post" action="{{ url_for('hide_comment_browser', comment_id=comment.id) }}">{{ csrf_input() }}<button class="secondary" type="submit">Hide comment</button></form>
+            {% endif %}
+          {% endif %}
         </div>
       {% else %}
         <p class="small">No comments yet.</p>

@@ -14,6 +14,7 @@ from .domain import *
 from .exchange import build_exchange, recipe_fingerprint, validate_exchange_payload
 from .sync_service import *
 from .security import login_allowed, login_retry_after, record_login_failure, record_login_success, rotate_session
+from .policies import can_delete_comment, can_edit_comment, can_hide_comment, can_unhide_comment
 
 bp = Blueprint("main", __name__)
 
@@ -36,7 +37,7 @@ def activity():
         events = [
             dict(row)
             for row in conn.execute(
-                "SELECT e.* FROM activity_events e LEFT JOIN recipes r ON r.id=e.recipe_id WHERE e.recipe_id IS NULL OR r.visibility='shared_epn' OR r.owner_id=? ORDER BY e.created_at DESC LIMIT 50",
+                "SELECT e.* FROM activity_events e LEFT JOIN recipes r ON r.id=e.recipe_id WHERE (e.recipe_id IS NULL OR r.visibility='shared_epn' OR r.owner_id=?) AND NOT (e.event_type='comment_added' AND EXISTS (SELECT 1 FROM comments c WHERE c.id=json_extract(e.payload_json, '$.comment_id') AND (c.deleted_at IS NOT NULL OR c.hidden_at IS NOT NULL))) ORDER BY e.created_at DESC LIMIT 50",
                 (user["id"],),
             )
         ]
@@ -210,12 +211,15 @@ def recipe_detail(recipe_id):
         flash("Recipe not found.", "error")
         return redirect(url_for("index"))
     decorated = decorate_recipe(data, recipe, user.get("inventory", []) if user else [])
-    comments = []
-    for comment in decorated.get("comments", []):
+    comments = decorated.get("comments", [])
+    if user and recipe["owner_id"] == user["id"]:
+        comments = list_comments(recipe_id, user["id"], include_hidden=True)
+    enriched_comments = []
+    for comment in comments:
         enriched = dict(comment)
         enriched["user"] = next((profile for profile in data["users"] if profile["id"] == comment["user_id"]), {"name": "Guest"})
-        comments.append(enriched)
-    decorated["comments"] = comments
+        enriched_comments.append(enriched)
+    decorated["comments"] = enriched_comments
     return render_template("detail.html", title=APP_TITLE, user=user, recipe=decorated, active="cards")
 
 
@@ -453,12 +457,93 @@ def comment_recipe(recipe_id):
     body = request.form.get("body", "").strip()
     if recipe and body:
         try:
-            create_comment(recipe_id, user["id"], body)
+            comment_id = create_comment(recipe_id, user["id"], body)
+            with db_connect() as conn:
+                conn.execute(
+                    "INSERT INTO activity_events(id,user_id,event_type,recipe_id,payload_json,created_at) VALUES(?,?,?,?,?,?)",
+                    (
+                        f"event-{uuid.uuid4().hex}",
+                        user["id"],
+                        "comment_added",
+                        recipe_id,
+                        json.dumps({"comment_id": comment_id}),
+                        now_iso(),
+                    ),
+                )
         except ValueError as exc:
             flash(str(exc), "error")
             return redirect(url_for("recipe_detail", recipe_id=recipe_id))
         flash("Comment added.")
     return redirect(url_for("recipe_detail", recipe_id=recipe_id))
+
+
+def _browser_comment(comment_id: str):
+    with db_connect() as conn:
+        return conn.execute(
+            "SELECT c.*, r.owner_id AS recipe_owner, r.visibility AS recipe_visibility FROM comments c JOIN recipes r ON r.id = c.recipe_id WHERE c.id = ?",
+            (comment_id,),
+        ).fetchone()
+
+
+@bp.route("/comments/<comment_id>/edit", methods=["GET", "POST"])
+def edit_comment(comment_id: str):
+    data = load_data(user_id=session.get("user_id", ""))
+    user = current_user(data)
+    row = _browser_comment(comment_id)
+    recipe = {"owner_id": row["recipe_owner"], "visibility": row["recipe_visibility"]} if row else {}
+    comment = dict(row) if row else {}
+    if not user or not row or not can_edit_comment(comment, recipe, user["id"]):
+        return redirect(url_for("index"))
+    if request.method == "POST":
+        try:
+            update_comment(comment_id, request.form.get("body", ""))
+        except ValueError as exc:
+            flash(str(exc), "error")
+            return redirect(url_for("edit_comment", comment_id=comment_id))
+        flash("Comment updated.")
+        return redirect(url_for("recipe_detail", recipe_id=row["recipe_id"]))
+    return render_template("comment_edit.html", title=APP_TITLE, user=user, comment=comment, active="cards")
+
+
+@bp.route("/comments/<comment_id>/delete", methods=["POST"])
+def delete_comment_browser(comment_id: str):
+    data = load_data(user_id=session.get("user_id", ""))
+    user = current_user(data)
+    row = _browser_comment(comment_id)
+    recipe = {"owner_id": row["recipe_owner"], "visibility": row["recipe_visibility"]} if row else {}
+    if user and row and can_delete_comment(dict(row), recipe, user["id"]):
+        delete_comment(comment_id)
+        flash("Comment deleted.")
+        return redirect(url_for("recipe_detail", recipe_id=row["recipe_id"]))
+    return redirect(url_for("index"))
+
+
+@bp.route("/comments/<comment_id>/hide", methods=["POST"])
+def hide_comment_browser(comment_id: str):
+    data = load_data(user_id=session.get("user_id", ""))
+    user = current_user(data)
+    row = _browser_comment(comment_id)
+    recipe = {"owner_id": row["recipe_owner"], "visibility": row["recipe_visibility"]} if row else {}
+    if user and row and can_hide_comment(dict(row), recipe, user["id"]):
+        hide_comment(comment_id, user["id"])
+        flash("Comment hidden from the recipe.")
+        return redirect(url_for("recipe_detail", recipe_id=row["recipe_id"]))
+    flash("You are not allowed to hide that comment.", "error")
+    return redirect(url_for("recipe_detail", recipe_id=row["recipe_id"]) if row else url_for("index"))
+
+
+@bp.route("/comments/<comment_id>/unhide", methods=["POST"])
+def unhide_comment_browser(comment_id: str):
+    data = load_data(user_id=session.get("user_id", ""))
+    user = current_user(data)
+    row = _browser_comment(comment_id)
+    recipe = {"owner_id": row["recipe_owner"], "visibility": row["recipe_visibility"]} if row else {}
+    if user and row and can_unhide_comment(dict(row), recipe, user["id"]):
+        unhide_comment(comment_id)
+        flash("Comment is visible again.")
+        return redirect(url_for("recipe_detail", recipe_id=row["recipe_id"]))
+    flash("You are not allowed to unhide that comment.", "error")
+    return redirect(url_for("recipe_detail", recipe_id=row["recipe_id"]) if row else url_for("index"))
 
 
 @bp.route("/inventory", methods=["GET", "POST"])

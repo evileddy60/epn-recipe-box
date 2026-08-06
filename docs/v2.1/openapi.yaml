@@ -208,10 +208,30 @@ paths:
       parameters: [{ name: comment_id, in: path, required: true, schema: { type: string } }]
       responses: { '200': { description: Updated comment } }
     delete:
-      summary: Delete own comment or hide as recipe owner
+      summary: Delete own comment
       security: [{ bearerAuth: [] }]
       parameters: [{ name: comment_id, in: path, required: true, schema: { type: string } }]
-      responses: { '204': { description: Deleted or hidden } }
+      responses: { '204': { description: Comment deleted } }
+  /comments/{comment_id}/hide:
+    post:
+      summary: Hide a comment as the recipe owner
+      security: [{ bearerAuth: [] }]
+      parameters: [{ name: comment_id, in: path, required: true, schema: { type: string } }]
+      responses:
+        '204': { description: Comment hidden or already hidden }
+        '401': { description: Authentication required }
+        '403': { description: Recipe-owner authorization required }
+        '404': { description: Comment not found or not visible to caller }
+  /comments/{comment_id}/unhide:
+    post:
+      summary: Unhide a comment as the recipe owner
+      security: [{ bearerAuth: [] }]
+      parameters: [{ name: comment_id, in: path, required: true, schema: { type: string } }]
+      responses:
+        '204': { description: Comment visible or already visible }
+        '401': { description: Authentication required }
+        '403': { description: Recipe-owner authorization required }
+        '404': { description: Comment not found or not visible to caller }
   /activity:
     get:
       summary: Paginated privacy-filtered activity feed

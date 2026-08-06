@@ -31,3 +31,43 @@ def can_mutate_recipe(recipe: dict, user_id: str | None) -> bool:
 
 def can_comment_or_rate(recipe: dict, user_id: str | None, selected_user_ids: set[str] | None = None) -> bool:
     return can_view_recipe(recipe, user_id, selected_user_ids)
+
+
+def can_view_comment(comment: dict, recipe: dict, user_id: str | None, selected_user_ids: set[str] | None = None) -> bool:
+    return can_view_recipe(recipe, user_id, selected_user_ids) and not comment.get("deleted_at") and not comment.get("hidden_at")
+
+
+def can_edit_comment(comment: dict, recipe: dict, user_id: str | None) -> bool:
+    return (
+        can_view_recipe(recipe, user_id)
+        and comment.get("user_id") == user_id
+        and not comment.get("deleted_at")
+        and not comment.get("hidden_at")
+    )
+
+
+def can_delete_comment(comment: dict, recipe: dict, user_id: str | None) -> bool:
+    return (
+        can_view_recipe(recipe, user_id)
+        and comment.get("user_id") == user_id
+        and not comment.get("deleted_at")
+        and not comment.get("hidden_at")
+    )
+
+
+def can_hide_comment(comment: dict, recipe: dict, user_id: str | None) -> bool:
+    return (
+        can_view_recipe(recipe, user_id)
+        and recipe.get("owner_id") == user_id
+        and not comment.get("deleted_at")
+        and not comment.get("hidden_at")
+    )
+
+
+def can_unhide_comment(comment: dict, recipe: dict, user_id: str | None) -> bool:
+    return (
+        can_view_recipe(recipe, user_id)
+        and recipe.get("owner_id") == user_id
+        and not comment.get("deleted_at")
+        and bool(comment.get("hidden_at"))
+    )
