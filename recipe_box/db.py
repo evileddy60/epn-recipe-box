@@ -579,6 +579,23 @@ def create_account(email: str, password: str) -> str:
     return user_id
 
 
+def reset_account_password(email: str, password: str) -> bool:
+    """Replace an existing account password using the normal password hasher."""
+    normalized_email = email.strip().lower()
+    if len(normalized_email) > MAX_EMAIL_LENGTH or not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", normalized_email):
+        raise ValueError("Enter a valid email address.")
+    if not 8 <= len(password) <= 128:
+        raise ValueError("Password must be between 8 and 128 characters.")
+
+    password_hash = generate_password_hash(password)
+    with db_connect() as conn:
+        result = conn.execute(
+            "UPDATE users SET password_hash = ? WHERE lower(email) = ?",
+            (password_hash, normalized_email),
+        )
+    return result.rowcount == 1
+
+
 def authenticate_user(email: str, password: str) -> str | None:
     init_db()
     with db_connect() as conn:
