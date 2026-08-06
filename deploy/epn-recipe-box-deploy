@@ -1,0 +1,279 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+# Controlled EPN Recipe Box deployment wrapper.
+# All paths may be overridden for isolated tests; production defaults are explicit.
+SERVICE_NAME="${EPN_RECIPE_BOX_SERVICE:-epn-recipe-box.service}"
+REPO_DIR="${EPN_RECIPE_BOX_REPO:-/home/epn/work/epn-recipe-box-sync}"
+DATA_DIR="${EPN_RECIPE_BOX_DATA_DIR:-/var/lib/epn-recipe-box}"
+BACKUP_ROOT="${EPN_RECIPE_BOX_BACKUP_ROOT:-/var/backups/epn-recipe-box}"
+HEALTH_URL="${EPN_RECIPE_BOX_HEALTH_URL:-http://127.0.0.1:5055/api/v1/health}"
+TAILSCALE_HEALTH_URL="${EPN_RECIPE_BOX_TAILSCALE_HEALTH_URL:-}"
+EXPECTED_SCHEMA="${EPN_RECIPE_BOX_SCHEMA:-14}"
+
+DB_PATH="$DATA_DIR/recipe_box.db"
+UPLOADS_PATH="$DATA_DIR/uploads"
+IMAGES_PATH="$DATA_DIR/recipe-images"
+
+fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+require_cmd() { command -v "$1" >/dev/null 2>&1 || fail "required command is unavailable: $1"; }
+
+sqlite_integrity() {
+    python3 - "$1" <<'PY'
+import sqlite3
+import sys
+
+with sqlite3.connect(sys.argv[1]) as conn:
+    result = conn.execute("PRAGMA integrity_check").fetchone()[0]
+if result != "ok":
+    raise SystemExit(f"SQLite integrity check failed: {result}")
+PY
+}
+
+schema_version() {
+    python3 - "$1" <<'PY'
+import sqlite3
+import sys
+
+with sqlite3.connect(sys.argv[1]) as conn:
+    row = conn.execute("SELECT version FROM schema_version ORDER BY version DESC LIMIT 1").fetchone()
+if not row:
+    raise SystemExit("schema_version table is missing or empty")
+print(row[0])
+PY
+}
+
+absolute_existing() {
+    [[ "$1" = /* ]] || fail "path must be absolute: $1"
+    realpath -e -- "$1"
+}
+
+safe_backup_dir() {
+    local requested resolved root
+    requested="$1"
+    root="$(absolute_existing "$BACKUP_ROOT")"
+    resolved="$(absolute_existing "$requested")"
+    [[ -d "$resolved" ]] || fail "backup path is not a directory: $requested"
+    [[ "$resolved" != "$root" && "$resolved" == "$root"/* ]] || fail "backup path is outside the approved backup root"
+    [[ "$(basename -- "$resolved")" != .* ]] || fail "hidden backup paths are not permitted"
+    printf '%s\n' "$resolved"
+}
+
+reject_symlinks() {
+    local root="$1"
+    [[ ! -L "$root" ]] || fail "symlink is not permitted: $root"
+    if find -- "$root" -type l -print -quit | grep -q .; then
+        fail "asset tree contains a symlink: $root"
+    fi
+}
+
+verify_checksums() {
+    python3 - "$1" <<'PY'
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1]).resolve()
+manifest_path = root / "manifest.json"
+try:
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+except (OSError, ValueError) as exc:
+    raise SystemExit(f"checksum manifest is unreadable: {exc}")
+if not isinstance(manifest, list):
+    raise SystemExit("checksum manifest is not a list")
+seen = set()
+for item in manifest:
+    if not isinstance(item, dict) or not isinstance(item.get("path"), str):
+        raise SystemExit("checksum manifest entry is invalid")
+    relative = Path(item["path"])
+    if relative.is_absolute() or ".." in relative.parts:
+        raise SystemExit(f"checksum manifest path is unsafe: {item['path']}")
+    path = root / relative
+    if path.is_symlink() or not path.is_file() or path == manifest_path:
+        raise SystemExit(f"checksum asset is missing or unsafe: {item['path']}")
+    actual = hashlib.sha256(path.read_bytes()).hexdigest()
+    if path.stat().st_size != item.get("size") or actual != item.get("sha256"):
+        raise SystemExit(f"checksum verification failed: {item['path']}")
+    seen.add(item["path"])
+if "recipe_box.db" not in seen:
+    raise SystemExit("checksum manifest does not cover the database")
+PY
+}
+
+write_checksums() {
+    python3 - "$1" <<'PY'
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1]).resolve()
+files = []
+for path in sorted(root.rglob("*")):
+    if path.name == "manifest.json":
+        continue
+    if path.is_symlink() or not path.is_file():
+        continue
+    relative = path.relative_to(root).as_posix()
+    files.append({"path": relative, "size": path.stat().st_size, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
+(root / "manifest.json").write_text(json.dumps(files, indent=2) + "\n", encoding="utf-8")
+PY
+}
+
+verify_backup() {
+    require_cmd realpath
+    local backup db uploads images
+    backup="$(safe_backup_dir "$1")"
+    db="$backup/recipe_box.db"
+    uploads="$backup/uploads"
+    images="$backup/recipe-images"
+    [[ -f "$db" && ! -L "$db" ]] || fail "backup database is missing or is a symlink"
+    [[ -d "$uploads" && ! -L "$uploads" ]] || fail "backup uploads directory is missing or is a symlink"
+    [[ -d "$images" && ! -L "$images" ]] || fail "backup recipe-images directory is missing or is a symlink"
+    reject_symlinks "$uploads"
+    reject_symlinks "$images"
+    verify_checksums "$backup"
+    sqlite_integrity "$db"
+    if [[ -f "$images/manifest.json" ]]; then
+        python3 - "$images" <<'PY'
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1]).resolve()
+manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+if not isinstance(manifest, list):
+    raise SystemExit("recipe-images manifest is not a list")
+for item in manifest:
+    if not isinstance(item, dict) or not isinstance(item.get("path"), str):
+        raise SystemExit("recipe-images manifest entry is invalid")
+    path = (root / item["path"]).resolve()
+    if path.parent != root or not path.is_file():
+        raise SystemExit(f"recipe-images asset is missing: {item['path']}")
+    if path.stat().st_size != item.get("size") or hashlib.sha256(path.read_bytes()).hexdigest() != item.get("sha256"):
+        raise SystemExit(f"recipe-images asset checksum failed: {item['path']}")
+PY
+    fi
+    printf '%s\n' "$backup"
+}
+
+service_is_active() { systemctl is-active --quiet "$SERVICE_NAME"; }
+require_stopped() { service_is_active && fail "service must be stopped before restore" || true; }
+
+restore() {
+    require_cmd cp
+    require_cmd find
+    require_cmd mktemp
+    require_stopped
+    local backup stage old_db old_uploads old_images
+    backup="$(verify_backup "$1")"
+    mkdir -p -- "$DATA_DIR"
+    [[ "$DATA_DIR" = /* && "$DATA_DIR" != / && ! -L "$DATA_DIR" ]] || fail "unsafe data directory"
+    stage="$(mktemp -d "$DATA_DIR/.restore.XXXXXXXX")"
+    old_db=""; old_uploads=""; old_images=""
+    cleanup() { rm -rf -- "$stage"; }
+    trap cleanup RETURN
+    cp -- "$backup/recipe_box.db" "$stage/recipe_box.db"
+    cp -a -- "$backup/uploads" "$stage/uploads"
+    cp -a -- "$backup/recipe-images" "$stage/recipe-images"
+    sqlite_integrity "$stage/recipe_box.db"
+    old_db="$(mktemp -u "$DATA_DIR/.rollback-db.XXXXXXXX")"
+    old_uploads="$(mktemp -u "$DATA_DIR/.rollback-uploads.XXXXXXXX")"
+    old_images="$(mktemp -u "$DATA_DIR/.rollback-images.XXXXXXXX")"
+    [[ ! -e "$old_db" && ! -e "$old_uploads" && ! -e "$old_images" ]] || fail "restore transaction path collision"
+    [[ ! -L "$DB_PATH" && ! -L "$UPLOADS_PATH" && ! -L "$IMAGES_PATH" ]] || fail "live data path contains a symlink"
+    [[ ! -e "$DB_PATH" || -f "$DB_PATH" ]] || fail "live database path is not a regular file"
+    [[ ! -e "$UPLOADS_PATH" || -d "$UPLOADS_PATH" ]] || fail "live uploads path is not a directory"
+    [[ ! -e "$IMAGES_PATH" || -d "$IMAGES_PATH" ]] || fail "live recipe-images path is not a directory"
+    if [[ -e "$DB_PATH" ]]; then mv -- "$DB_PATH" "$old_db"; fi
+    if [[ -e "$UPLOADS_PATH" ]]; then mv -- "$UPLOADS_PATH" "$old_uploads"; fi
+    if [[ -e "$IMAGES_PATH" ]]; then mv -- "$IMAGES_PATH" "$old_images"; fi
+    if ! mv -- "$stage/recipe_box.db" "$DB_PATH" || ! mv -- "$stage/uploads" "$UPLOADS_PATH" || ! mv -- "$stage/recipe-images" "$IMAGES_PATH"; then
+        rm -f -- "$DB_PATH"
+        rm -rf -- "$UPLOADS_PATH" "$IMAGES_PATH"
+        [[ ! -e "$old_db" || -e "$DB_PATH" ]] || mv -- "$old_db" "$DB_PATH"
+        [[ ! -e "$old_uploads" || -e "$UPLOADS_PATH" ]] || mv -- "$old_uploads" "$UPLOADS_PATH"
+        [[ ! -e "$old_images" || -e "$IMAGES_PATH" ]] || mv -- "$old_images" "$IMAGES_PATH"
+        fail "restore swap failed; prior data was retained where possible"
+    fi
+    rm -f -- "$old_db"
+    rm -rf -- "$old_uploads" "$old_images"
+    trap - RETURN
+    cleanup
+    printf '%s\n' "restored $backup"
+}
+
+backup_data() {
+    require_cmd date
+    require_stopped
+    mkdir -p -- "$BACKUP_ROOT"
+    local target
+    target="$BACKUP_ROOT/pre-deploy-$(date -u +%Y%m%d-%H%M%S)"
+    (umask 077; mkdir -- "$target") || fail "backup target already exists: $target"
+    python3 - "$DB_PATH" "$target/recipe_box.db" <<'PY'
+import sqlite3
+import sys
+
+with sqlite3.connect(sys.argv[1]) as source, sqlite3.connect(sys.argv[2]) as target:
+    source.backup(target)
+PY
+    cp -a -- "$UPLOADS_PATH" "$target/uploads"
+    cp -a -- "$IMAGES_PATH" "$target/recipe-images"
+    write_checksums "$target"
+    verify_backup "$target" >/dev/null
+    printf '%s\n' "$target"
+}
+
+health_check() {
+    require_cmd curl
+    curl --fail --silent --show-error --max-time 15 "$HEALTH_URL" >/dev/null || fail "local health check failed"
+    if [[ -n "$TAILSCALE_HEALTH_URL" ]]; then
+        curl --fail --silent --show-error --max-time 20 "$TAILSCALE_HEALTH_URL" >/dev/null || fail "Tailscale health check failed"
+    fi
+}
+
+schema_check() {
+    local expected="${1:-$EXPECTED_SCHEMA}" actual
+    actual="$(schema_version "$DB_PATH")"
+    [[ "$actual" == "$expected" ]] || fail "schema mismatch: expected $expected, got $actual"
+}
+
+deploy() {
+    local commit="$1"
+    [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || fail "deploy requires an exact 40-character commit SHA"
+    git -C "$REPO_DIR" fetch --quiet origin
+    git -C "$REPO_DIR" cat-file -e "$commit^{commit}" || fail "commit does not exist locally"
+    git -C "$REPO_DIR" checkout --detach --quiet "$commit"
+    git -C "$REPO_DIR" diff --quiet --exit-code || fail "deployment worktree is dirty"
+}
+
+rollback() {
+    [[ $# -eq 2 ]] || fail "usage: rollback PREVIOUS_COMMIT BACKUP_PATH"
+    local commit="$1" backup="$2" rollback_schema
+    [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || fail "rollback requires an exact 40-character commit SHA"
+    safe_backup_dir "$backup" >/dev/null
+    systemctl stop "$SERVICE_NAME"
+    restore "$backup"
+    rollback_schema="$(schema_version "$DB_PATH")"
+    deploy "$commit"
+    systemctl start "$SERVICE_NAME"
+    [[ -n "$TAILSCALE_HEALTH_URL" ]] || fail "rollback requires a Tailscale health URL"
+    health_check
+    schema_check "$rollback_schema"
+    printf '%s\n' "rollback complete: commit=$commit backup=$(absolute_existing "$backup")"
+}
+
+case "${1:-}" in
+    verify-backup) [[ $# -eq 2 ]] || fail "usage: verify-backup BACKUP_PATH"; verify_backup "$2" ;;
+    restore) [[ $# -eq 2 ]] || fail "usage: restore BACKUP_PATH"; restore "$2" ;;
+    rollback) rollback "${2:-}" "${3:-}" ;;
+    backup) [[ $# -eq 1 ]] || fail "usage: backup"; backup_data ;;
+    deploy) [[ $# -eq 2 ]] || fail "usage: deploy COMMIT"; deploy "$2" ;;
+    start) systemctl start "$SERVICE_NAME" ;;
+    stop) systemctl stop "$SERVICE_NAME" ;;
+    restart) systemctl restart "$SERVICE_NAME" ;;
+    status) systemctl status --no-pager "$SERVICE_NAME" ;;
+    *) fail "usage: $0 {status|start|stop|restart|backup|verify-backup|restore|rollback|deploy} ..." ;;
+esac

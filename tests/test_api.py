@@ -165,10 +165,25 @@ class ApiFoundationTests(unittest.TestCase):
         token = self.login()
         created = self.create_recipe(token, title="Stateful Card")
         recipe_id = created["id"]
+        archived = self.client.post(f"/api/v1/recipes/{recipe_id}/archive", headers={"Authorization": f"Bearer {token}"})
+        self.assertEqual(archived.status_code, 204)
+        # Application initialization must not replay the legacy global archive column over user-local state.
+        self.recipe_app.init_db()
+        self.assertEqual(self.client.get(f"/api/v1/recipes/{recipe_id}", headers={"Authorization": f"Bearer {token}"}).status_code, 404)
+        other_id = self.recipe_app.create_account("archive-other@example.com", "correct-horse")
+        self.recipe_app.update_profile(other_id, "Archive Other", "", "")
+        other_token = self.client.post(
+            "/api/v1/auth/login", json={"email": "archive-other@example.com", "password": "correct-horse"}
+        ).get_json()["token"]
         self.assertEqual(
-            self.client.post(f"/api/v1/recipes/{recipe_id}/archive", headers={"Authorization": f"Bearer {token}"}).status_code, 204
+            self.client.get(f"/api/v1/recipes/{recipe_id}", headers={"Authorization": f"Bearer {other_token}"}).status_code, 200
         )
-        self.assertEqual(self.client.get("/api/v1/recipes", headers={"Authorization": f"Bearer {token}"}).status_code, 200)
+        restored = self.client.delete(f"/api/v1/recipes/{recipe_id}/archive", headers={"Authorization": f"Bearer {token}"})
+        self.assertEqual(restored.status_code, 204)
+        self.assertEqual(self.client.get(f"/api/v1/recipes/{recipe_id}", headers={"Authorization": f"Bearer {token}"}).status_code, 200)
+        self.assertEqual(
+            self.client.get(f"/api/v1/recipes/{recipe_id}", headers={"Authorization": f"Bearer {other_token}"}).status_code, 200
+        )
         collection = self.client.post(
             "/api/v1/collections", headers={"Authorization": f"Bearer {token}"}, json={"name": "Weeknight", "visibility": "shared_epn"}
         )

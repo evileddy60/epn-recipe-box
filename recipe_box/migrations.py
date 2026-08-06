@@ -320,15 +320,6 @@ def _sync_legacy_user_state(conn: sqlite3.Connection) -> None:
         """,
             (now,),
         )
-    conn.execute(
-        """
-        UPDATE recipe_user_state SET is_archived = CASE WHEN r.archived_at IS NULL THEN 0 ELSE 1 END,
-            archived_at = r.archived_at, updated_at = ?
-        FROM recipes r
-        WHERE r.owner_id=recipe_user_state.user_id AND r.id=recipe_user_state.recipe_id
-    """,
-        (now,),
-    )
 
 
 def migrate_database(path: Path, migrations_override: Iterable[Migration] | None = None) -> int:

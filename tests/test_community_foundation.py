@@ -49,7 +49,9 @@ class CommunityMigrationTests(unittest.TestCase):
                     "SELECT is_favorite, is_archived, archived_at FROM recipe_user_state WHERE user_id = ? AND recipe_id = ?",
                     ("legacy-user", "r1"),
                 ).fetchone()
-                self.assertEqual(state, (1, 1, "archived"))
+                # Legacy archive state is imported during the migration that creates recipe_user_state;
+                # later startup must not overwrite user-local state from the legacy global column.
+                self.assertEqual(state, (1, 0, None))
                 self.assertEqual(conn.execute("SELECT body, created_at FROM comments WHERE id = 'c1'").fetchone(), ("old comment", "then"))
 
     def test_community_migrations_are_idempotent_and_have_expected_columns(self):

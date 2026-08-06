@@ -160,13 +160,41 @@ class RecipeFeatureTests(unittest.TestCase):
         archived_view = self.client.get("/?archived=1")
         self.assertEqual(archived_view.status_code, 200)
         detail = self.client.get(f"/recipes/{recipe_id}")
-        self.assertEqual(detail.status_code, 200)
+        self.assertEqual(detail.status_code, 302)
         archived_export = self.client.get(f"/recipes/{recipe_id}/export")
         self.assertEqual(archived_export.status_code, 200)
         self.assertEqual(archived_export.get_json()["recipes"][0]["id"], recipe_id)
         response = self.client.post(f"/recipes/{recipe_id}/restore", data={"csrf_token": self._csrf()})
         self.assertEqual(response.status_code, 302)
         self.assertIn(b"Image Recipe", self.client.get("/").data)
+
+    def test_browser_owner_archive_and_restore_matches_api_state(self):
+        recipe_id = self._recipe(title="Owner Archive Card")
+        archived = self.client.post(f"/recipes/{recipe_id}/archive", data={"csrf_token": self._csrf()})
+        self.assertEqual(archived.status_code, 302)
+        self.recipe_app.init_db()
+        with self.recipe_app.db_connect() as conn:
+            self.assertEqual(
+                conn.execute(
+                    "SELECT is_archived FROM recipe_user_state WHERE user_id = (SELECT id FROM users WHERE email=?) AND recipe_id=?",
+                    ("feature@example.com", recipe_id),
+                ).fetchone()[0],
+                1,
+            )
+        self.assertIn(b"Your recipe library is empty", self.client.get("/").data)
+        self.assertIn(b"Owner Archive Card", self.client.get("/?archived=1").data)
+        restored = self.client.post(f"/recipes/{recipe_id}/restore", data={"csrf_token": self._csrf()})
+        self.assertEqual(restored.status_code, 302)
+        self.recipe_app.init_db()
+        self.assertIn(b"Owner Archive Card", self.client.get("/").data)
+        with self.recipe_app.db_connect() as conn:
+            self.assertEqual(
+                conn.execute(
+                    "SELECT is_archived FROM recipe_user_state WHERE user_id = (SELECT id FROM users WHERE email=?) AND recipe_id=?",
+                    ("feature@example.com", recipe_id),
+                ).fetchone()[0],
+                0,
+            )
 
     def test_export_import_preview_and_duplicate_conflict(self):
         recipe_id = self._recipe()
