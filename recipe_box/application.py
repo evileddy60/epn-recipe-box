@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from flask import Flask, render_template
+from flask import Flask, render_template, send_from_directory
 from werkzeug.exceptions import HTTPException
 
 from .config import API_BASE_URL, API_TOKEN_TTL_DAYS, APP_TITLE, STATIC_DIR, SYNC_TIMEOUT_SECONDS, https_enabled, runtime_secret_key
@@ -28,6 +28,11 @@ def create_app() -> Flask:
     application.context_processor(lambda: {"csrf_token": csrf_token, "csrf_input": csrf_input, "app_title": APP_TITLE})
     application.before_request(validate_csrf)
     application.after_request(apply_security_headers)
+
+    @application.get("/favicon.ico")
+    def favicon():
+        """Serve the conventional root favicon URL as well as /static/favicon.ico."""
+        return send_from_directory(STATIC_DIR, "favicon.ico", mimetype="image/vnd.microsoft.icon")
 
     @application.errorhandler(HTTPException)
     def handle_http_error(error):

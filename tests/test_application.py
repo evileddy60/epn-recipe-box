@@ -66,6 +66,13 @@ class ApplicationFlowTests(unittest.TestCase):
         self.assertIn("Collections (coming soon)", body)
         self.assertLess(body.index("Sign in"), body.index("Create account"))
 
+    def test_conventional_root_favicon_is_served(self):
+        response = self.client.get("/favicon.ico")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.mimetype, "image/vnd.microsoft.icon")
+        self.assertGreater(len(response.data), 0)
+        response.close()
+
     def test_homepage_shows_shared_community_statistics_and_content(self):
         self.signup_and_profile()
         response = self.client.post(
