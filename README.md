@@ -206,6 +206,18 @@ python tools/recipe_box_backup.py restore ~/recipe-box-backups/recipe_box-<times
 
 `GET /health` returns only application status, database status, and schema version.
 
+## Administrator password reset
+
+Use the server-side management command when an operator must reset an existing account password. Run it from the server project directory with the same environment and virtual environment used by the application:
+
+```bash
+cd /srv/samba/HERMES-01/Projects/EPN-Recipe-Box/Server
+source .venv/bin/activate
+python manage.py reset-password user@example.com
+```
+
+The command prompts for the new password twice using hidden input. It never accepts a password as a command-line argument, prints password hashes, or changes authentication rules. It returns a non-zero status for invalid input, mismatched confirmation, or an unknown email address. Stop or coordinate with the running service before changing production data, and ensure the command uses the intended `EPN_DATA_DIR`/database.
+
 ## Continuous integration
 
 GitHub Actions runs on pushes and pull requests for Python 3.11–3.13. It installs pinned runtime/development dependencies and runs compilation, Ruff lint/format checks, the full unittest suite (including migration/backup/security/synchronization coverage), Bandit, pip-audit, and whitespace validation.
