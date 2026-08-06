@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 # Controlled EPN Recipe Box deployment wrapper.
-# All paths may be overridden for isolated tests; production defaults are explicit.
+WRAPPER_VERSION="2026.08.06.2"
 SERVICE_NAME="${EPN_RECIPE_BOX_SERVICE:-epn-recipe-box.service}"
 REPO_DIR="${EPN_RECIPE_BOX_REPO:-/opt/epn-recipe-box}"
 DATA_DIR="${EPN_RECIPE_BOX_DATA_DIR:-/var/lib/epn-recipe-box}"
@@ -10,7 +10,7 @@ BACKUP_ROOT="${EPN_RECIPE_BOX_BACKUP_ROOT:-/var/backups/epn-recipe-box}"
 HEALTH_URL="${EPN_RECIPE_BOX_HEALTH_URL:-http://127.0.0.1:5055/api/v1/health}"
 TAILSCALE_HEALTH_URL="${EPN_RECIPE_BOX_TAILSCALE_HEALTH_URL:-}"
 EXPECTED_SCHEMA="${EPN_RECIPE_BOX_SCHEMA:-14}"
-
+APPROVED_REF="${EPN_RECIPE_BOX_APPROVED_REF:-refs/remotes/origin/fix/comment-owner-hide}"
 DB_PATH="$DATA_DIR/recipe_box.db"
 UPLOADS_PATH="$DATA_DIR/uploads"
 IMAGES_PATH="$DATA_DIR/recipe-images"
@@ -22,7 +22,6 @@ sqlite_integrity() {
     python3 - "$1" <<'PY'
 import sqlite3
 import sys
-
 with sqlite3.connect(sys.argv[1]) as conn:
     result = conn.execute("PRAGMA integrity_check").fetchone()[0]
 if result != "ok":
@@ -34,7 +33,6 @@ schema_version() {
     python3 - "$1" <<'PY'
 import sqlite3
 import sys
-
 with sqlite3.connect(sys.argv[1]) as conn:
     row = conn.execute("SELECT version FROM schema_version ORDER BY version DESC LIMIT 1").fetchone()
 if not row:
@@ -73,7 +71,6 @@ import hashlib
 import json
 import sys
 from pathlib import Path
-
 root = Path(sys.argv[1]).resolve()
 manifest_path = root / "manifest.json"
 try:
@@ -107,7 +104,6 @@ import hashlib
 import json
 import sys
 from pathlib import Path
-
 root = Path(sys.argv[1]).resolve()
 files = []
 for path in sorted(root.rglob("*")):
@@ -141,7 +137,6 @@ import hashlib
 import json
 import sys
 from pathlib import Path
-
 root = Path(sys.argv[1]).resolve()
 manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
 if not isinstance(manifest, list):
@@ -163,9 +158,7 @@ service_is_active() { systemctl is-active --quiet "$SERVICE_NAME"; }
 require_stopped() { service_is_active && fail "service must be stopped before restore" || true; }
 
 restore() {
-    require_cmd cp
-    require_cmd find
-    require_cmd mktemp
+    require_cmd cp; require_cmd find; require_cmd mktemp
     require_stopped
     local backup stage old_db old_uploads old_images
     backup="$(verify_backup "$1")"
@@ -191,47 +184,61 @@ restore() {
     if [[ -e "$UPLOADS_PATH" ]]; then mv -- "$UPLOADS_PATH" "$old_uploads"; fi
     if [[ -e "$IMAGES_PATH" ]]; then mv -- "$IMAGES_PATH" "$old_images"; fi
     if ! mv -- "$stage/recipe_box.db" "$DB_PATH" || ! mv -- "$stage/uploads" "$UPLOADS_PATH" || ! mv -- "$stage/recipe-images" "$IMAGES_PATH"; then
-        rm -f -- "$DB_PATH"
-        rm -rf -- "$UPLOADS_PATH" "$IMAGES_PATH"
+        rm -f -- "$DB_PATH"; rm -rf -- "$UPLOADS_PATH" "$IMAGES_PATH"
         [[ ! -e "$old_db" || -e "$DB_PATH" ]] || mv -- "$old_db" "$DB_PATH"
         [[ ! -e "$old_uploads" || -e "$UPLOADS_PATH" ]] || mv -- "$old_uploads" "$UPLOADS_PATH"
         [[ ! -e "$old_images" || -e "$IMAGES_PATH" ]] || mv -- "$old_images" "$IMAGES_PATH"
         fail "restore swap failed; prior data was retained where possible"
     fi
-    rm -f -- "$old_db"
-    rm -rf -- "$old_uploads" "$old_images"
-    trap - RETURN
-    cleanup
+    rm -f -- "$old_db"; rm -rf -- "$old_uploads" "$old_images"
+    trap - RETURN; cleanup
     printf '%s\n' "restored $backup"
 }
 
 backup_data() {
-    require_cmd date
-    require_stopped
-    mkdir -p -- "$BACKUP_ROOT"
+    require_cmd date; require_cmd cp; require_cmd rm
     local target
+    mkdir -p -- "$BACKUP_ROOT"
     target="$BACKUP_ROOT/pre-deploy-$(date -u +%Y%m%d-%H%M%S)"
     (umask 077; mkdir -- "$target") || fail "backup target already exists: $target"
-    python3 - "$DB_PATH" "$target/recipe_box.db" <<'PY'
+    if ! python3 - "$DB_PATH" "$target/recipe_box.db" <<'PY'
 import sqlite3
 import sys
-
 with sqlite3.connect(sys.argv[1]) as source, sqlite3.connect(sys.argv[2]) as target:
     source.backup(target)
 PY
-    cp -a -- "$UPLOADS_PATH" "$target/uploads"
-    cp -a -- "$IMAGES_PATH" "$target/recipe-images"
-    write_checksums "$target"
-    verify_backup "$target" >/dev/null
+    then rm -rf -- "$target"; fail "SQLite online backup failed"; fi
+    if ! cp -a -- "$UPLOADS_PATH" "$target/uploads" || ! cp -a -- "$IMAGES_PATH" "$target/recipe-images"; then
+        rm -rf -- "$target"; fail "asset backup failed"
+    fi
+    if ! write_checksums "$target"; then rm -rf -- "$target"; fail "backup manifest creation failed"; fi
+    if ! verify_backup "$target" >/dev/null; then rm -rf -- "$target"; fail "created backup failed verification"; fi
     printf '%s\n' "$target"
 }
+
+approved_ref_valid() {
+    [[ "$APPROVED_REF" =~ ^refs/remotes/origin/[A-Za-z0-9._/-]+$ && "$APPROVED_REF" != *..* && "$APPROVED_REF" != */ && "$APPROVED_REF" != *//* ]]
+}
+
+ensure_clean_checkout() {
+    [[ -d "$REPO_DIR" ]] || fail "production repository does not exist: $REPO_DIR"
+    git -C "$REPO_DIR" rev-parse --git-dir >/dev/null 2>&1 || fail "production repository is not a valid Git checkout"
+    git -C "$REPO_DIR" diff --quiet --exit-code || fail "deployment worktree is dirty"
+}
+
+approved_fetch() {
+    approved_ref_valid || fail "approved remote ref is invalid: $APPROVED_REF"
+    ensure_clean_checkout
+    git -C "$REPO_DIR" fetch --prune origin
+    git -C "$REPO_DIR" rev-parse --verify "$APPROVED_REF^{commit}" >/dev/null 2>&1 || fail "approved remote ref does not exist: $APPROVED_REF"
+}
+
+remote_approved_commit() { git -C "$REPO_DIR" rev-parse --verify "$APPROVED_REF^{commit}" 2>/dev/null || true; }
 
 health_check() {
     require_cmd curl
     curl --fail --silent --show-error --max-time 15 "$HEALTH_URL" >/dev/null || fail "local health check failed"
-    if [[ -n "$TAILSCALE_HEALTH_URL" ]]; then
-        curl --fail --silent --show-error --max-time 20 "$TAILSCALE_HEALTH_URL" >/dev/null || fail "Tailscale health check failed"
-    fi
+    if [[ -n "$TAILSCALE_HEALTH_URL" ]]; then curl --fail --silent --show-error --max-time 20 "$TAILSCALE_HEALTH_URL" >/dev/null || fail "Tailscale health check failed"; fi
 }
 
 schema_check() {
@@ -241,12 +248,14 @@ schema_check() {
 }
 
 deploy() {
-    local commit="$1"
+    local commit="$1" approved
     [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || fail "deploy requires an exact 40-character commit SHA"
-    git -C "$REPO_DIR" fetch --quiet origin
+    approved_fetch
+    approved="$(remote_approved_commit)"
     git -C "$REPO_DIR" cat-file -e "$commit^{commit}" || fail "commit does not exist locally"
+    git -C "$REPO_DIR" merge-base --is-ancestor "$commit" "$approved" || fail "commit is outside the approved remote branch"
     git -C "$REPO_DIR" checkout --detach --quiet "$commit"
-    git -C "$REPO_DIR" diff --quiet --exit-code || fail "deployment worktree is dirty"
+    [[ "$(git -C "$REPO_DIR" rev-parse HEAD)" == "$commit" ]] || fail "deployment checkout did not reach requested commit"
 }
 
 rollback() {
@@ -254,15 +263,38 @@ rollback() {
     local commit="$1" backup="$2" rollback_schema
     [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || fail "rollback requires an exact 40-character commit SHA"
     safe_backup_dir "$backup" >/dev/null
-    systemctl stop "$SERVICE_NAME"
-    restore "$backup"
-    rollback_schema="$(schema_version "$DB_PATH")"
-    deploy "$commit"
+    systemctl stop "$SERVICE_NAME"; restore "$backup"
+    rollback_schema="$(schema_version "$DB_PATH")"; deploy "$commit"
     systemctl start "$SERVICE_NAME"
     [[ -n "$TAILSCALE_HEALTH_URL" ]] || fail "rollback requires a Tailscale health URL"
-    health_check
-    schema_check "$rollback_schema"
+    health_check; schema_check "$rollback_schema"
     printf '%s\n' "rollback complete: commit=$commit backup=$(absolute_existing "$backup")"
+}
+
+service_state() { if service_is_active; then printf 'active'; else printf 'inactive'; fi; }
+
+info() {
+    local current approved schema state path
+    current="$(git -C "$REPO_DIR" rev-parse --verify HEAD 2>/dev/null || true)"
+    approved="$(remote_approved_commit)"
+    schema="unknown"; [[ -f "$DB_PATH" ]] && schema="$(schema_version "$DB_PATH" 2>/dev/null || printf unknown)"
+    state="$(service_state)"
+    path="$(realpath -e -- "${BASH_SOURCE[0]}" 2>/dev/null || printf unknown)"
+    printf 'wrapper_version=%s\nwrapper_path=%s\nrepository_path=%s\ndata_path=%s\nbackup_root=%s\nservice=%s\napproved_ref=%s\ncurrent_commit=%s\nremote_approved_commit=%s\nschema_version=%s\nservice_state=%s\nhealth_url=%s\ntailscale_health_url=%s\n' "$WRAPPER_VERSION" "$path" "$REPO_DIR" "$DATA_DIR" "$BACKUP_ROOT" "$SERVICE_NAME" "$APPROVED_REF" "${current:-unknown}" "${approved:-unknown}" "$schema" "$state" "$HEALTH_URL" "$TAILSCALE_HEALTH_URL"
+}
+
+self_check() {
+    local command
+    for command in bash cp date find git mktemp python3 realpath rm systemctl; do require_cmd "$command"; done
+    approved_ref_valid || fail "approved remote ref is invalid: $APPROVED_REF"
+    [[ "$SERVICE_NAME" =~ ^[A-Za-z0-9_.@:-]+$ ]] || fail "service name is invalid"
+    [[ -d "$REPO_DIR" ]] || fail "repository path is missing: $REPO_DIR"
+    git -C "$REPO_DIR" rev-parse --git-dir >/dev/null 2>&1 || fail "repository is not a valid Git checkout"
+    [[ -d "$DATA_DIR" && -d "$BACKUP_ROOT" ]] || fail "data or backup path is missing"
+    [[ -f "$DB_PATH" && ! -L "$DB_PATH" ]] || fail "database is missing or unsafe"
+    sqlite_integrity "$DB_PATH"
+    schema_check >/dev/null
+    printf 'self-check=ok\n'
 }
 
 case "${1:-}" in
@@ -270,10 +302,13 @@ case "${1:-}" in
     restore) [[ $# -eq 2 ]] || fail "usage: restore BACKUP_PATH"; restore "$2" ;;
     rollback) rollback "${2:-}" "${3:-}" ;;
     backup) [[ $# -eq 1 ]] || fail "usage: backup"; backup_data ;;
+    fetch-approved) [[ $# -eq 1 ]] || fail "usage: fetch-approved"; approved_fetch; printf 'approved_ref=%s\nremote_approved_commit=%s\ncurrent_deployed_commit=%s\n' "$APPROVED_REF" "$(remote_approved_commit)" "$(git -C "$REPO_DIR" rev-parse HEAD)" ;;
     deploy) [[ $# -eq 2 ]] || fail "usage: deploy COMMIT"; deploy "$2" ;;
+    info) [[ $# -eq 1 ]] || fail "usage: info"; info ;;
+    self-check) [[ $# -eq 1 ]] || fail "usage: self-check"; self_check ;;
     start) systemctl start "$SERVICE_NAME" ;;
     stop) systemctl stop "$SERVICE_NAME" ;;
     restart) systemctl restart "$SERVICE_NAME" ;;
     status) systemctl status --no-pager "$SERVICE_NAME" ;;
-    *) fail "usage: $0 {status|start|stop|restart|backup|verify-backup|restore|rollback|deploy} ..." ;;
+    *) fail "usage: $0 {status|start|stop|restart|backup|verify-backup|restore|rollback|fetch-approved|deploy|info|self-check} ..." ;;
 esac
