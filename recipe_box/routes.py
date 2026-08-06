@@ -66,11 +66,21 @@ def index():
     tag = request.args.get("tag", "")
     favorites = request.args.get("favorites", "") == "1"
     archived = request.args.get("archived", "") == "1"
-    data = load_data(search=search, category=category, tag=tag, favorites=favorites, archived=archived, user_id=session.get("user_id", ""))
+    user_id = session.get("user_id", "")
+    data = (
+        load_data(search=search, category=category, tag=tag, favorites=favorites, archived=archived, user_id=user_id)
+        if user_id
+        else {
+            "users": [],
+            "recipes": [],
+            "categories": [],
+            "tags": [],
+            "filters": {"q": search, "category": category, "tag": tag, "favorites": favorites, "archived": archived},
+        }
+    )
+    community = community_home_data()
     user = current_user(data)
-    if not user:
-        return redirect(url_for("signup"))
-    if not profile_ready(user):
+    if user and not profile_ready(user):
         return redirect(url_for("profile_setup"))
     inventory = user.get("inventory", []) if user else []
     recipes = [decorate_recipe(data, recipe, inventory) for recipe in data["recipes"]]
@@ -84,7 +94,8 @@ def index():
         categories=data["categories"],
         available_tags=data["tags"],
         filters=data["filters"],
-        active="cards",
+        community=community,
+        active="recipes",
     )
 
 

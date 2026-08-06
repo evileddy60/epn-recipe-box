@@ -1,108 +1,114 @@
-
 {% extends "base.html" %}
 {% block content %}
-<section class="workspace">
-  <div class="recipe-box">
-    <p class="box-label">Shared cards</p>
-    <form class="filter-panel" method="get" action="{{ url_for('index') }}" aria-label="Filter recipes">
-      <label>Search recipes
-        <input name="q" value="{{ filters.q }}" maxlength="120" placeholder="Chicken, soup, quick...">
-      </label>
-      <div class="two">
-        <label>Category
-          <select name="category">
-            <option value="">All categories</option>
-            {% for item in categories %}
-              <option value="{{ item.category_key }}" {% if filters.category == item.category_key %}selected{% endif %}>{{ item.display_name }}</option>
-            {% endfor %}
-          </select>
-        </label>
-        <label>Tag
-          <select name="tag">
-            <option value="">All tags</option>
-            {% for item in available_tags %}
-              <option value="{{ item.normalized_name }}" {% if filters.tag == item.normalized_name %}selected{% endif %}>{{ item.display_name }}</option>
-            {% endfor %}
-          </select>
-        </label>
+<section class="community-dashboard" aria-labelledby="community-heading">
+  <div class="community-intro">
+    <p class="box-label">The EPN community table</p>
+    <h2 id="community-heading">What has the Evil People Network been cooking lately?</h2>
+    <p>See recipes shared by the community, discover favorite flavors, and add your own ideas to the table.</p>
+  </div>
+
+  <div class="stats-grid" aria-label="Community statistics">
+    <div class="stat-card" aria-label="Recipes: {{ community.stats.recipes }}"><strong>{{ community.stats.recipes }}</strong><span>Recipes</span></div>
+    <div class="stat-card" aria-label="Members: {{ community.stats.members }}"><strong>{{ community.stats.members }}</strong><span>Members</span></div>
+    <div class="stat-card" aria-label="Collections: {{ community.stats.collections }}"><strong>{{ community.stats.collections }}</strong><span>Collections</span></div>
+    <div class="stat-card" aria-label="Comments: {{ community.stats.comments }}"><strong>{{ community.stats.comments }}</strong><span>Comments</span></div>
+  </div>
+
+  {% if not user %}
+    <section class="auth-panel panel" aria-labelledby="welcome-heading">
+      <div>
+        <p class="box-label">Welcome to the table</p>
+        <h2 id="welcome-heading">Keep cooking with your people.</h2>
+        <p class="small">Sign in to open your recipe box, or create an account when you are ready to join.</p>
       </div>
-      <label class="check-row"><input type="checkbox" name="favorites" value="1" {% if filters.favorites %}checked{% endif %}> Favorites only</label>
-      <div class="actions">
-        <button type="submit">Apply filters</button>
-        <a class="button secondary" href="{{ url_for('index') }}">Clear filters</a>
+      <div class="auth-actions">
+        <a class="button" href="{{ url_for('signup') }}#sign-in">Sign in</a>
+        <a class="button secondary" href="{{ url_for('signup') }}#create-account">Create account</a>
       </div>
-    </form>
-    {% if filters.q or filters.category or filters.tag %}
-      <p class="active-filters" role="status">Active filters: {% if filters.q %}“{{ filters.q }}”{% endif %}{% if filters.category %} · {{ filters.category|replace('-', ' ')|title }}{% endif %}{% if filters.tag %} · #{{ filters.tag }}{% endif %}</p>
-    {% endif %}
-    <div class="actions view-switcher">
-      <a class="button secondary" href="{{ url_for('index') }}">Active recipes</a>
-      <a class="button secondary" href="{{ url_for('index', favorites=1) }}">Favorites</a>
-      <a class="button secondary" href="{{ url_for('index', archived=1) }}">Archived</a>
-      <a class="button secondary" href="{{ url_for('export_all_recipes') }}">Export all</a>
-      <a class="button secondary" href="{{ url_for('import_preview') }}">Import</a>
+    </section>
+  {% else %}
+    <div class="community-primary-action">
+      <a class="button" href="{{ url_for('new_recipe') }}">+ New Recipe</a>
     </div>
+  {% endif %}
+
+  <div class="community-grid">
+    {% for section in [
+      ('Recently Shared Recipes', community.recent),
+      ('Highest Rated Recipes', community.highest_rated),
+      ('Newest Recipes', community.newest)
+    ] %}
+      <section class="panel community-section" aria-labelledby="section-{{ loop.index }}">
+        <h3 id="section-{{ loop.index }}">{{ section[0] }}</h3>
+        {% if section[1] %}
+          <div class="community-list">
+            {% for recipe in section[1] %}
+              <article class="community-item">
+                <h4><a href="{{ url_for('recipe_detail', recipe_id=recipe.id) }}">{{ recipe.title }}</a></h4>
+                <p class="small">by {{ recipe.owner_name }}{% if recipe.average_rating %} · ★ {{ recipe.average_rating }}{% endif %}</p>
+                {% if recipe.summary %}<p>{{ recipe.summary }}</p>{% endif %}
+              </article>
+            {% endfor %}
+          </div>
+        {% else %}
+          <p class="empty" role="status">No recipes have been shared yet.</p>
+        {% endif %}
+      </section>
+    {% endfor %}
+
+    <section class="panel community-section" aria-labelledby="active-members-heading">
+      <h3 id="active-members-heading">Recently Active Members</h3>
+      {% if community.active_members %}
+        <div class="tags">{% for member in community.active_members %}<span class="tag">{{ member.name }}</span>{% endfor %}</div>
+      {% else %}
+        <p class="empty" role="status">No community activity yet.</p>
+      {% endif %}
+    </section>
+    <section class="panel community-section" aria-labelledby="categories-heading">
+      <h3 id="categories-heading">Popular Categories</h3>
+      {% if community.categories %}
+        <div class="tags">{% for category in community.categories %}<span class="tag">{{ category.category_key|replace('-', ' ')|title }} · {{ category.recipe_count }}</span>{% endfor %}</div>
+      {% else %}
+        <p class="empty" role="status">Categories will appear as recipes are shared.</p>
+      {% endif %}
+    </section>
+    <section class="panel community-section" aria-labelledby="tags-heading">
+      <h3 id="tags-heading">Trending Tags</h3>
+      {% if community.tags %}
+        <div class="tags">{% for tag in community.tags %}<span class="tag">#{{ tag.display_name }} · {{ tag.recipe_count }}</span>{% endfor %}</div>
+      {% else %}
+        <p class="empty" role="status">Tags will start trending after the first shared recipes.</p>
+      {% endif %}
+    </section>
+  </div>
+</section>
+
+{% if user %}
+<section class="workspace recipe-library" aria-labelledby="recipes-heading">
+  <div class="recipe-box">
+    <p class="box-label">Recipe library</p>
+    <h2 id="recipes-heading">Your Recipes</h2>
+    <form class="filter-panel" method="get" action="{{ url_for('index') }}" aria-label="Filter recipes">
+      <label>Search recipes<input name="q" value="{{ filters.q }}" maxlength="120" placeholder="Chicken, soup, quick..."></label>
+      <div class="two">
+        <label>Category<select name="category"><option value="">All categories</option>{% for item in categories %}<option value="{{ item.category_key }}" {% if filters.category == item.category_key %}selected{% endif %}>{{ item.display_name }}</option>{% endfor %}</select></label>
+        <label>Tag<select name="tag"><option value="">All tags</option>{% for item in available_tags %}<option value="{{ item.normalized_name }}" {% if filters.tag == item.normalized_name %}selected{% endif %}>{{ item.display_name }}</option>{% endfor %}</select></label>
+      </div>
+      <div class="actions"><button type="submit">Apply filters</button><a class="button secondary" href="{{ url_for('index') }}">Clear filters</a></div>
+    </form>
+    <div class="actions view-switcher"><a class="button secondary" href="{{ url_for('index') }}">Active recipes</a><a class="button secondary" href="{{ url_for('index', favorites=1) }}">Favorites</a><a class="button secondary" href="{{ url_for('index', archived=1) }}">Archived</a><a class="button secondary" href="{{ url_for('export_all_recipes') }}">Export all</a><a class="button secondary" href="{{ url_for('import_preview') }}">Import</a></div>
     <div class="cards">
       {% for recipe in recipes %}
         <article class="recipe-card">
           {% if recipe.image_filename %}<img class="recipe-image" src="{{ url_for('recipe_image', filename=recipe.image_filename) }}" alt="Photo of {{ recipe.title }}" loading="lazy">{% else %}<div class="image-fallback" role="img" aria-label="No photo for {{ recipe.title }}">Recipe card</div>{% endif %}
-          <div class="recipe-head">
-            <div>
-              <h2>{{ recipe.title }}</h2>
-              <div class="meta">by {{ recipe.owner.name }} &middot; {{ recipe.prep_time }} &middot; {{ recipe.servings }} servings</div>
-            </div>
-            <div class="meta">&#9733; {{ recipe.average_rating or "New" }}{% if recipe.rating_count %} ({{ recipe.rating_count }}){% endif %}</div>
-          </div>
-          <div class="badges"><span class="badge">{{ recipe.category_label }}</span>{% for tag in recipe.tags %}<span class="tag">#{{ tag.display_name }}</span>{% endfor %}</div>
-          <p class="summary">{{ recipe.summary }}</p>
-          <div class="tags">
-            {% for item in recipe.ingredients[:5] %}
-              <span class="tag">{{ item }}</span>
-            {% endfor %}
-          </div>
-          {% if recipe.match_count %}
-            <div class="small">{{ recipe.match_count }} of {{ recipe.ingredient_count }} ingredients in stock</div>
-          {% endif %}
-          <div class="actions">
-            <a class="button" href="{{ url_for('recipe_detail', recipe_id=recipe.id) }}">Open card</a>
-            <form method="post" action="{{ url_for('unfavorite_recipe' if recipe.favorite else 'favorite_recipe', recipe_id=recipe.id) }}">{{ csrf_input() }}<button class="secondary" type="submit" aria-label="{{ 'Unfavorite' if recipe.favorite else 'Favorite' }} {{ recipe.title }}">{{ '★ Unfavorite' if recipe.favorite else '☆ Favorite' }}</button></form>
-            {% if user and recipe.owner_id == user.id %}
-              <a class="button secondary" href="{{ url_for('edit_recipe', recipe_id=recipe.id) }}">Edit</a>
-              {% if recipe.archived_at %}<form method="post" action="{{ url_for('restore_recipe', recipe_id=recipe.id) }}">{{ csrf_input() }}<button class="green" type="submit">Restore</button></form>{% else %}<form method="post" action="{{ url_for('archive_recipe', recipe_id=recipe.id) }}">{{ csrf_input() }}<button class="secondary" type="submit">Archive</button></form>{% endif %}
-            {% endif %}
-          </div>
+          <div class="recipe-head"><div><h2>{{ recipe.title }}</h2><div class="meta">by {{ recipe.owner.name }} &middot; {{ recipe.prep_time }} &middot; {{ recipe.servings }} servings</div></div><div class="meta">&#9733; {{ recipe.average_rating or "New" }}{% if recipe.rating_count %} ({{ recipe.rating_count }}){% endif %}</div></div>
+          <div class="badges"><span class="badge">{{ recipe.category_label }}</span>{% for tag in recipe.tags %}<span class="tag">#{{ tag.display_name }}</span>{% endfor %}</div><p class="summary">{{ recipe.summary }}</p>
+          <div class="actions"><a class="button" href="{{ url_for('recipe_detail', recipe_id=recipe.id) }}">Open recipe</a><form method="post" action="{{ url_for('unfavorite_recipe' if recipe.favorite else 'favorite_recipe', recipe_id=recipe.id) }}">{{ csrf_input() }}<button class="secondary" type="submit" aria-label="{{ 'Unfavorite' if recipe.favorite else 'Favorite' }} {{ recipe.title }}">{{ '★ Unfavorite' if recipe.favorite else '☆ Favorite' }}</button></form>{% if recipe.owner_id == user.id %}<a class="button secondary" href="{{ url_for('edit_recipe', recipe_id=recipe.id) }}">Edit</a>{% endif %}</div>
         </article>
-      {% else %}
-        <div class="empty" role="status">{% if filters.q or filters.category or filters.tag %}No recipes matched these filters. Try clearing one or broadening your search.{% elif user %}No recipes yet. Add the first card to the box.{% else %}Sign up to start building your recipe box.{% endif %}</div>
-      {% endfor %}
+      {% else %}<div class="empty" role="status">{% if filters.q or filters.category or filters.tag %}No recipes matched these filters. Try clearing one or broadening your search.{% else %}Your recipe library is empty. Add the first recipe to the box.{% endif %}</div>{% endfor %}
     </div>
   </div>
-
-  <aside>
-    <section class="panel">
-      <h3>Your food stock</h3>
-      {% if user.inventory %}
-        <div class="tags">
-          {% for item in user.inventory %}
-            <span class="tag">{{ item }}</span>
-          {% endfor %}
-        </div>
-      {% else %}
-        <p class="small">Add ingredients to unlock recipe suggestions.</p>
-      {% endif %}
-      <div class="actions">
-        <a class="button green" href="{{ url_for('inventory') }}">Update stock</a>
-      </div>
-    </section>
-
-    <section class="panel">
-      <h3>Best matches</h3>
-      {% for recipe in suggestions %}
-        <p><strong>{{ recipe.title }}</strong><br><span class="small">{{ recipe.match_count }} of {{ recipe.ingredient_count }} matched</span></p>
-      {% else %}
-        <p class="small">Add stock items and recipes will sort themselves into place.</p>
-      {% endfor %}
-    </section>
-  </aside>
+  <aside><section class="panel"><h3>Your food stock</h3>{% if user.inventory %}<div class="tags">{% for item in user.inventory %}<span class="tag">{{ item }}</span>{% endfor %}</div>{% else %}<p class="small">Add ingredients to unlock recipe suggestions.</p>{% endif %}<div class="actions"><a class="button green" href="{{ url_for('inventory') }}">Update stock</a></div></section><section class="panel"><h3>Best matches</h3>{% for recipe in suggestions %}<p><strong>{{ recipe.title }}</strong><br><span class="small">{{ recipe.match_count }} of {{ recipe.ingredient_count }} matched</span></p>{% else %}<p class="small">Add stock items and recipes will sort themselves into place.</p>{% endfor %}</section></aside>
 </section>
+{% endif %}
 {% endblock %}

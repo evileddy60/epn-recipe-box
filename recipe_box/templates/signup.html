@@ -1,31 +1,26 @@
-
 {% extends "base.html" %}
 {% block content %}
-<section class="workspace">
-  <div class="panel">
-    <h2>Sign up</h2>
+<section class="auth-layout" aria-label="Account access">
+  <div class="panel auth-primary" id="sign-in">
+    <p class="box-label">Welcome back</p>
+    <h2>Sign in</h2>
+    <p class="small">Open your recipe box and keep cooking with the EPN community.</p>
     <form method="post">
-      {{ csrf_input() }}      <input type="hidden" name="mode" value="signup">
-      <label>Email
-        <input type="email" name="email" autocomplete="email" required>
-      </label>
-      <label>Password
-        <input type="password" name="password" autocomplete="new-password" minlength="8" required>
-      </label>
-      <button type="submit">Create account</button>
+      {{ csrf_input() }}<input type="hidden" name="mode" value="login">
+      <label>Email<input type="email" name="email" autocomplete="email" required></label>
+      <label>Password<input type="password" name="password" autocomplete="current-password" required></label>
+      <button type="submit">Sign in</button>
     </form>
   </div>
-  <div class="panel">
-    <h2>Sign in</h2>
+  <div class="panel auth-secondary" id="create-account">
+    <p class="box-label">New to the table?</p>
+    <h2>Create account</h2>
+    <p class="small">Start a private recipe collection for the Evil People Network.</p>
     <form method="post">
-      {{ csrf_input() }}      <input type="hidden" name="mode" value="login">
-      <label>Email
-        <input type="email" name="email" autocomplete="email" required>
-      </label>
-      <label>Password
-        <input type="password" name="password" autocomplete="current-password" required>
-      </label>
-      <button class="secondary" type="submit">Sign in</button>
+      {{ csrf_input() }}<input type="hidden" name="mode" value="signup">
+      <label>Email<input type="email" name="email" autocomplete="email" required></label>
+      <label>Password<input type="password" name="password" autocomplete="new-password" minlength="8" required></label>
+      <button class="secondary" type="submit">Create account</button>
     </form>
   </div>
 </section>

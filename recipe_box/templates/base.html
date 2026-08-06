@@ -11,7 +11,7 @@
   <main class="shell">
     <section class="hero">
       <h1>EPN Recipe Box</h1>
-      <p>Create, share, rate, and remix recipes from the food you already have.</p>
+      <p>Share your favorite recipes with the Evil People Network.</p>
     </section>
 
     <div class="topbar">
@@ -24,10 +24,12 @@
         <span>{{ user.name if user and user.nickname else "Sign up" }}</span>
       </a>
       <nav class="nav" aria-label="Primary">
-        <a class="nav-chip" href="{{ url_for('index') }}">Cards</a>
-        <a class="nav-chip" href="{{ url_for('new_recipe') }}">New recipe</a>
+        <a class="nav-chip" href="{{ url_for('index') }}">Recipes</a>
+        <span class="nav-chip disabled" aria-disabled="true">Collections (coming soon)</span>
+        <a class="nav-chip" href="{{ url_for('activity') }}">Activity</a>
         <a class="nav-chip" href="{{ url_for('inventory') }}">Inventory</a>
         <a class="nav-chip" href="{{ url_for('sync_dashboard') }}">Sync</a>
+        <a class="nav-chip primary-nav" href="{{ url_for('new_recipe') }}">+ New Recipe</a>
         {% if user %}
           <form method="post" action="{{ url_for('logout') }}" style="margin:0;">
             {{ csrf_input() }}            <button class="secondary" type="submit">Logout</button>
@@ -46,11 +48,12 @@
   </main>
 
   <nav class="bottom-nav" aria-label="Mobile primary">
-    <a class="{% if active == 'cards' %}active{% endif %}" href="{{ url_for('index') }}">Cards</a>
-    <a class="{% if active == 'new' %}active{% endif %}" href="{{ url_for('new_recipe') }}">Create</a>
-    <a class="{% if active == 'inventory' %}active{% endif %}" href="{{ url_for('inventory') }}">Stock</a>
+    <a class="{% if active == 'recipes' %}active{% endif %}" href="{{ url_for('index') }}">Recipes</a>
+    <a class="{% if active == 'activity' %}active{% endif %}" href="{{ url_for('activity') }}">Activity</a>
+    <a href="#" class="disabled" aria-disabled="true">Collections</a>
+    <a class="{% if active == 'inventory' %}active{% endif %}" href="{{ url_for('inventory') }}">Inventory</a>
     <a class="{% if active == 'sync' %}active{% endif %}" href="{{ url_for('sync_dashboard') }}">Sync</a>
-    <a class="{% if active == 'profile' %}active{% endif %}" href="{{ url_for('profile_setup') if user else url_for('signup') }}">{{ "Profile" if user and user.nickname else "Sign up" }}</a>
+    <a class="{% if active == 'profile' %}active{% endif %}" href="{{ url_for('profile_setup') if user else url_for('signup') }}">{{ "Profile" if user and user.nickname else "Sign in" }}</a>
   </nav>
 </body>
 </html>

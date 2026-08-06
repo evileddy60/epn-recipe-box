@@ -464,6 +464,92 @@ def load_data(
     }
 
 
+def community_home_data(limit: int = 6) -> dict:
+    """Return bounded, aggregate-backed data for the community homepage."""
+    init_db()
+    limit = max(1, min(int(limit), 12))
+    with db_connect() as conn:
+        stats = dict(
+            conn.execute(
+                """
+                SELECT
+                    (SELECT COUNT(*) FROM recipes WHERE visibility = 'shared_epn') AS recipes,
+                    (SELECT COUNT(*) FROM users) AS members,
+                    (SELECT COUNT(*) FROM collections WHERE visibility = 'shared_epn') AS collections,
+                    (SELECT COUNT(*) FROM comments c JOIN recipes r ON r.id = c.recipe_id WHERE r.visibility = 'shared_epn') AS comments
+                """
+            ).fetchone()
+        )
+        recipe_fields = """
+            SELECT r.id, r.title, r.summary, r.category_key, r.created_at, r.updated_at,
+                   COALESCE(NULLIF(owner.nickname, ''), 'EPN cook') AS owner_name,
+                   COUNT(DISTINCT rating.user_id) AS rating_count,
+                   ROUND(AVG(rating.score), 1) AS average_rating
+            FROM recipes r
+            JOIN users owner ON owner.id = r.owner_id
+            LEFT JOIN ratings rating ON rating.recipe_id = r.id
+            WHERE r.visibility = 'shared_epn'
+            GROUP BY r.id
+        """
+
+        def recipes(order_by: str) -> list[dict]:
+            return [
+                dict(row)
+                for row in conn.execute(f"{recipe_fields} ORDER BY {order_by} LIMIT ?", (limit,))  # nosec B608 - fixed internal order clauses
+            ]
+
+        recent = recipes("r.updated_at DESC")
+        highest_rated = recipes("CASE WHEN rating_count = 0 THEN 1 ELSE 0 END, average_rating DESC, rating_count DESC, r.created_at DESC")
+        newest = recipes("r.created_at DESC")
+        active_members = [
+            dict(row)
+            for row in conn.execute(
+                """
+                SELECT u.id, COALESCE(NULLIF(u.nickname, ''), 'EPN cook') AS name,
+                       MAX(e.created_at) AS last_active
+                FROM activity_events e JOIN users u ON u.id = e.user_id
+                GROUP BY u.id ORDER BY last_active DESC LIMIT ?
+                """,
+                (limit,),
+            )
+        ]
+        categories = [
+            dict(row)
+            for row in conn.execute(
+                """
+                SELECT COALESCE(NULLIF(r.category_key, ''), 'other') AS category_key,
+                       COUNT(*) AS recipe_count
+                FROM recipes r WHERE r.visibility = 'shared_epn'
+                GROUP BY COALESCE(NULLIF(r.category_key, ''), 'other')
+                ORDER BY recipe_count DESC, category_key LIMIT ?
+                """,
+                (limit,),
+            )
+        ]
+        tags = [
+            dict(row)
+            for row in conn.execute(
+                """
+                SELECT t.display_name, COUNT(*) AS recipe_count
+                FROM recipe_tags rt JOIN tags t ON t.id = rt.tag_id
+                JOIN recipes r ON r.id = rt.recipe_id
+                WHERE r.visibility = 'shared_epn'
+                GROUP BY t.id ORDER BY recipe_count DESC, t.normalized_name LIMIT ?
+                """,
+                (limit,),
+            )
+        ]
+    return {
+        "stats": stats,
+        "recent": recent,
+        "highest_rated": highest_rated,
+        "newest": newest,
+        "active_members": active_members,
+        "categories": categories,
+        "tags": tags,
+    }
+
+
 def create_account(email: str, password: str) -> str:
     email = email.strip().lower()
     if len(email) > MAX_EMAIL_LENGTH or not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):

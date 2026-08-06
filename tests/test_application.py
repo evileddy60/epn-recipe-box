@@ -54,6 +54,51 @@ class ApplicationFlowTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 200)
 
+    def test_anonymous_homepage_is_community_focused_with_authentication(self):
+        response = self.client.get("/")
+        self.assertEqual(response.status_code, 200)
+        body = response.data.decode()
+        self.assertIn("What has the Evil People Network been cooking lately?", body)
+        self.assertIn("Recently Shared Recipes", body)
+        self.assertIn("Recently Active Members", body)
+        self.assertIn("No recipes have been shared yet.", body)
+        self.assertIn("Recipes", body)
+        self.assertIn("Collections (coming soon)", body)
+        self.assertLess(body.index("Sign in"), body.index("Create account"))
+
+    def test_homepage_shows_shared_community_statistics_and_content(self):
+        self.signup_and_profile()
+        response = self.client.post(
+            "/recipes/new",
+            data={
+                "title": "Community Stew",
+                "summary": "A shared pot.",
+                "prep_time": "30 min",
+                "servings": "4",
+                "ingredients": "beans\\ntomato",
+                "steps": "Cook together.",
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+        recipe_id = response.location.rsplit("/", 1)[-1]
+        with self.recipe_app.db_connect() as conn:
+            conn.execute("UPDATE recipes SET visibility = 'shared_epn' WHERE id = ?", (recipe_id,))
+        self.client.post(f"/recipes/{recipe_id}/rate", data={"score": "5"})
+        self.client.post(f"/recipes/{recipe_id}/comment", data={"body": "Lovely."})
+
+        body = self.client.get("/").data.decode()
+        self.assertIn("Community Stew", body)
+        self.assertIn("Highest Rated Recipes", body)
+        self.assertIn("Popular Categories", body)
+        self.assertIn("Trending Tags", body)
+        self.assertIn('aria-label="Recipes: 1"', body)
+        self.assertIn('aria-label="Members: 1"', body)
+        self.assertIn('aria-label="Comments: 1"', body)
+
+    def test_signup_prioritizes_sign_in_over_account_creation(self):
+        body = self.client.get("/signup").data.decode()
+        self.assertLess(body.index("Sign in"), body.index("Create account"))
+
     def test_signup_login_logout_and_authorization(self):
         self.signup_and_profile()
         response = self.client.post("/logout")
