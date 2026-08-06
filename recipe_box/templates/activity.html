@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="workspace">
+  <div class="recipe-box">
+    <p class="box-label">Community activity</p>
+    <h2>Activity</h2>
+    {% if events %}
+      <div class="cards" aria-live="polite">
+        {% for event in events %}
+          <article class="recipe-card">
+            <p><strong>{{ event.event_type|replace('_', ' ')|title }}</strong></p>
+            <p class="small">{{ event.created_at }}</p>
+            {% if event.recipe_id %}<a class="button secondary" href="{{ url_for('recipe_detail', recipe_id=event.recipe_id) }}">View recipe</a>{% endif %}
+            {% if event.collection_id %}<span class="small">Collection: {{ event.collection_id }}</span>{% endif %}
+          </article>
+        {% endfor %}
+      </div>
+    {% else %}
+      <p class="empty" role="status">No community activity yet.</p>
+    {% endif %}
+  </div>
+</section>
+{% endblock %}

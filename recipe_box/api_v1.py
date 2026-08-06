@@ -78,6 +78,9 @@ def _recipe_payload(row: sqlite3.Row | dict, conn: sqlite3.Connection) -> dict:
         "creator": {"id": row["owner_id"], "nickname": row["owner_nickname"]},
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
+        "visibility": row["visibility"] if "visibility" in row.keys() else "shared_epn",
+        "favorite": bool(row["favorite"]) if "favorite" in row.keys() else False,
+        "archived": bool(row["archived"]) if "archived" in row.keys() else False,
     }
 
 
@@ -194,8 +197,11 @@ def _recipe_query_filters():
 
 
 def _recipe_filter_sql(q: str, category: str, tag: str) -> tuple[str, list[str]]:
-    where = ["r.archived_at IS NULL"]
-    params: list[str] = []
+    where = [
+        "(r.owner_id = ? OR r.visibility = 'shared_epn')",
+        "COALESCE((SELECT is_archived FROM recipe_user_state s WHERE s.user_id = ? AND s.recipe_id = r.id), 0) = 0",
+    ]
+    params: list[str] = [g.api_user["id"], g.api_user["id"]]
     if q:
         needle = f"%{q.lower()}%"
         where.append(
@@ -228,13 +234,15 @@ def recipes():
         ).fetchone()["count"]
         rows = conn.execute(
             f"""
-            SELECT r.*, owner.nickname AS owner_nickname
+            SELECT r.*, owner.nickname AS owner_nickname,
+                   EXISTS (SELECT 1 FROM favorites f WHERE f.recipe_id=r.id AND f.user_id=?) AS favorite,
+                   COALESCE((SELECT is_archived FROM recipe_user_state s WHERE s.recipe_id=r.id AND s.user_id=?),0) AS archived
             FROM recipes r JOIN users owner ON owner.id = r.owner_id
             WHERE {where}
             ORDER BY r.updated_at DESC, r.id ASC
             LIMIT ? OFFSET ?
             """,  # nosec B608 - fixed SQL with bound filter values
-            [*params, page_size, (page - 1) * page_size],
+            [g.api_user["id"], g.api_user["id"], *params, page_size, (page - 1) * page_size],
         ).fetchall()
         data = [_recipe_payload(row, conn) for row in rows]
     total_pages = max(1, (total + page_size - 1) // page_size)
@@ -245,9 +253,15 @@ def recipes():
 @_require_token
 def recipe(recipe_id: str):
     with db_connect() as conn:
+        archived_state = conn.execute(
+            "SELECT is_archived FROM recipe_user_state WHERE recipe_id=? AND user_id=?",
+            (recipe_id, g.api_user["id"]),
+        ).fetchone()
+        if archived_state and archived_state["is_archived"]:
+            return _error("NOT_FOUND", "Recipe not found.", 404)
         row = conn.execute(
-            "SELECT r.*, owner.nickname AS owner_nickname FROM recipes r JOIN users owner ON owner.id = r.owner_id WHERE r.id = ? AND r.archived_at IS NULL",
-            (recipe_id,),
+            "SELECT r.*, owner.nickname AS owner_nickname, EXISTS (SELECT 1 FROM favorites f WHERE f.recipe_id=r.id AND f.user_id=?) AS favorite, COALESCE(state.is_archived,0) AS archived FROM recipes r JOIN users owner ON owner.id = r.owner_id LEFT JOIN recipe_user_state state ON state.recipe_id=r.id AND state.user_id=? WHERE r.id = ? AND (r.owner_id = ? OR r.visibility = 'shared_epn') AND COALESCE(state.is_archived,0)=0",
+            (g.api_user["id"], g.api_user["id"], recipe_id, g.api_user["id"]),
         ).fetchone()
         if not row:
             return _error("NOT_FOUND", "Recipe not found.", 404)
@@ -288,6 +302,7 @@ def create_api_recipe():
         "steps": "\n".join(steps),
         "category": payload.get("category", "") if isinstance(payload.get("category", ""), str) else "",
         "tags": ", ".join(tags),
+        "visibility": payload.get("visibility", "shared_epn"),
     }
     try:
         recipe_id = create_recipe(g.api_user["id"], form)
@@ -298,6 +313,8 @@ def create_api_recipe():
             "SELECT r.*, owner.nickname AS owner_nickname FROM recipes r JOIN users owner ON owner.id = r.owner_id WHERE r.id = ?",
             (recipe_id,),
         ).fetchone()
+        if row["visibility"] == "shared_epn":
+            _event(conn, "shared_recipe_created", recipe_id)
         response = _recipe_payload(row, conn)
     return jsonify(response), 201
 
@@ -317,10 +334,225 @@ def categories():
 @bp.route("/tags")
 @_require_token
 def tags():
-    init_db()
     with db_connect() as conn:
         data = [
             {"key": row["normalized_name"], "name": row["display_name"]}
             for row in conn.execute("SELECT normalized_name, display_name FROM tags ORDER BY normalized_name LIMIT 500")
         ]
     return jsonify({"data": data})
+
+
+# Community foundation endpoints. All authorization is evaluated at the API boundary.
+def _event(conn, kind, recipe_id=None, payload=None):
+    conn.execute(
+        "INSERT INTO activity_events(id,user_id,event_type,recipe_id,payload_json,created_at) VALUES(?,?,?,?,?,?)",
+        (f"event-{uuid.uuid4().hex}", g.api_user["id"], kind, recipe_id, json.dumps(payload or {}), _now_iso()),
+    )
+
+
+@bp.route("/recipes/<recipe_id>/favorite", methods=["POST", "DELETE"])
+@_require_token
+def api_favorite(recipe_id):
+    with db_connect() as conn:
+        if not conn.execute(
+            "SELECT 1 FROM recipes WHERE id=? AND (owner_id=? OR visibility='shared_epn')", (recipe_id, g.api_user["id"])
+        ).fetchone():
+            return _error("NOT_FOUND", "Recipe not found.", 404)
+        if request.method == "POST":
+            conn.execute(
+                "INSERT OR IGNORE INTO favorites(user_id,recipe_id,created_at) VALUES(?,?,?)", (g.api_user["id"], recipe_id, _now_iso())
+            )
+        else:
+            conn.execute("DELETE FROM favorites WHERE user_id=? AND recipe_id=?", (g.api_user["id"], recipe_id))
+    return ("", 204)
+
+
+@bp.route("/recipes/<recipe_id>/archive", methods=["POST", "DELETE"])
+@_require_token
+def api_archive(recipe_id):
+    set_recipe_archived(recipe_id, request.method == "POST", g.api_user["id"])
+    return ("", 204)
+
+
+@bp.route("/recipes/<recipe_id>", methods=["PATCH"])
+@_require_token
+def api_update_recipe(recipe_id):
+    payload = _json_body() or {}
+    try:
+        visibility = normalize_visibility(payload.get("visibility"))
+    except ValueError as exc:
+        return _error("VALIDATION_ERROR", str(exc), 422)
+    with db_connect() as conn:
+        row = conn.execute("SELECT * FROM recipes WHERE id=?", (recipe_id,)).fetchone()
+        if not row:
+            return _error("NOT_FOUND", "Recipe not found.", 404)
+        if row["owner_id"] != g.api_user["id"]:
+            return _error("FORBIDDEN", "Only the recipe owner can update it.", 403)
+        conn.execute("UPDATE recipes SET visibility=?, updated_at=? WHERE id=?", (visibility, _now_iso(), recipe_id))
+        row = conn.execute(
+            "SELECT r.*, owner.nickname AS owner_nickname FROM recipes r JOIN users owner ON owner.id=r.owner_id WHERE r.id=?", (recipe_id,)
+        ).fetchone()
+        return jsonify(_recipe_payload(row, conn))
+
+
+@bp.route("/collections", methods=["GET", "POST"])
+@_require_token
+def api_collections():
+    with db_connect() as conn:
+        if request.method == "GET":
+            rows = conn.execute(
+                "SELECT * FROM collections WHERE owner_id=? OR visibility='shared_epn' ORDER BY name", (g.api_user["id"],)
+            ).fetchall()
+            return jsonify({"data": [dict(r) for r in rows]})
+        body = _json_body() or {}
+        name = str(body.get("name", "")).strip()
+        visibility = body.get("visibility", "private")
+        if not name or len(name) > 120 or visibility not in {"private", "shared_epn"}:
+            return _error("VALIDATION_ERROR", "Collection name or visibility is invalid.", 422)
+        cid = f"col-{uuid.uuid4().hex}"
+        conn.execute(
+            "INSERT INTO collections(id,owner_id,name,created_at,updated_at,visibility) VALUES(?,?,?,?,?,?)",
+            (cid, g.api_user["id"], name, _now_iso(), _now_iso(), visibility),
+        )
+        if visibility == "shared_epn":
+            _event(conn, "shared_collection_created", payload={"collection_id": cid})
+        return jsonify(dict(conn.execute("SELECT * FROM collections WHERE id=?", (cid,)).fetchone())), 201
+
+
+@bp.route("/collections/<collection_id>", methods=["GET", "PATCH", "DELETE"])
+@_require_token
+def api_collection(collection_id):
+    with db_connect() as conn:
+        collection = conn.execute("SELECT * FROM collections WHERE id=?", (collection_id,)).fetchone()
+        if not collection or (collection["owner_id"] != g.api_user["id"] and collection["visibility"] != "shared_epn"):
+            return _error("NOT_FOUND", "Collection not found.", 404)
+        if request.method == "PATCH":
+            if collection["owner_id"] != g.api_user["id"]:
+                return _error("FORBIDDEN", "Only the collection owner can update it.", 403)
+            body = _json_body() or {}
+            name = str(body.get("name", collection["name"])).strip()
+            visibility = body.get("visibility", collection["visibility"])
+            if not name or len(name) > 120 or visibility not in {"private", "shared_epn"}:
+                return _error("VALIDATION_ERROR", "Collection name or visibility is invalid.", 422)
+            conn.execute(
+                "UPDATE collections SET name=?, visibility=?, updated_at=? WHERE id=?", (name, visibility, _now_iso(), collection_id)
+            )
+            collection = conn.execute("SELECT * FROM collections WHERE id=?", (collection_id,)).fetchone()
+        elif request.method == "DELETE":
+            if collection["owner_id"] != g.api_user["id"]:
+                return _error("FORBIDDEN", "Only the collection owner can delete it.", 403)
+            if conn.execute("SELECT 1 FROM collection_recipes WHERE collection_id=? LIMIT 1", (collection_id,)).fetchone():
+                return _error("CONFLICT", "Only empty collections can be deleted.", 409)
+            conn.execute("DELETE FROM collections WHERE id=?", (collection_id,))
+            return ("", 204)
+        recipes = conn.execute(
+            "SELECT r.* FROM recipes r JOIN collection_recipes cr ON cr.recipe_id=r.id WHERE cr.collection_id=? ORDER BY cr.position, cr.created_at",
+            (collection_id,),
+        ).fetchall()
+        payload = dict(collection)
+        payload["recipes"] = [_recipe_payload(row, conn) for row in recipes]
+        return jsonify(payload)
+
+
+@bp.route("/collections/<collection_id>/recipes", methods=["POST"])
+@bp.route("/collections/<collection_id>/recipes/<recipe_id>", methods=["POST", "DELETE"])
+@_require_token
+def api_collection_recipe(collection_id, recipe_id=None):
+    if recipe_id is None:
+        recipe_id = (_json_body() or {}).get("recipe_id")
+        if not isinstance(recipe_id, str) or not recipe_id:
+            return _error("VALIDATION_ERROR", "recipe_id is required.", 422)
+    with db_connect() as conn:
+        collection = conn.execute("SELECT * FROM collections WHERE id=?", (collection_id,)).fetchone()
+        recipe = conn.execute("SELECT * FROM recipes WHERE id=?", (recipe_id,)).fetchone()
+        if not collection or not recipe:
+            return _error("NOT_FOUND", "Collection or recipe not found.", 404)
+        if collection["owner_id"] != g.api_user["id"]:
+            return _error("FORBIDDEN", "Only the collection owner can manage it.", 403)
+        if request.method == "POST":
+            if collection["visibility"] == "shared_epn" and recipe["visibility"] != "shared_epn":
+                return _error("FORBIDDEN", "Private recipes cannot enter shared collections.", 403)
+            conn.execute(
+                "INSERT OR IGNORE INTO collection_recipes(collection_id,recipe_id,created_at) VALUES(?,?,?)",
+                (collection_id, recipe_id, _now_iso()),
+            )
+            if collection["visibility"] == "shared_epn":
+                _event(conn, "recipe_added_to_shared_collection", recipe_id, {"collection_id": collection_id})
+        else:
+            conn.execute("DELETE FROM collection_recipes WHERE collection_id=? AND recipe_id=?", (collection_id, recipe_id))
+    return ("", 204)
+
+
+@bp.route("/recipes/<recipe_id>/comments", methods=["GET", "POST"])
+@_require_token
+def api_comments(recipe_id):
+    with db_connect() as conn:
+        if not conn.execute(
+            "SELECT 1 FROM recipes WHERE id=? AND (owner_id=? OR visibility='shared_epn')", (recipe_id, g.api_user["id"])
+        ).fetchone():
+            return _error("NOT_FOUND", "Recipe not found.", 404)
+        if request.method == "GET":
+            rows = conn.execute(
+                "SELECT * FROM comments WHERE recipe_id=? AND deleted_at IS NULL AND hidden_at IS NULL ORDER BY created_at", (recipe_id,)
+            ).fetchall()
+            return jsonify({"data": [dict(r) for r in rows]})
+        try:
+            create_comment(recipe_id, g.api_user["id"], (_json_body() or {}).get("body", ""))
+        except (ValueError, TypeError) as exc:
+            return _error("VALIDATION_ERROR", str(exc), 422)
+        row = conn.execute(
+            "SELECT * FROM comments WHERE recipe_id=? AND user_id=? ORDER BY created_at DESC LIMIT 1", (recipe_id, g.api_user["id"])
+        ).fetchone()
+        _event(conn, "comment_added", recipe_id)
+        return jsonify(dict(row)), 201
+
+
+@bp.route("/comments/<comment_id>", methods=["PATCH", "DELETE"])
+@_require_token
+def api_comment(comment_id):
+    with db_connect() as conn:
+        row = conn.execute(
+            "SELECT c.*, r.owner_id AS recipe_owner FROM comments c JOIN recipes r ON r.id=c.recipe_id WHERE c.id=?", (comment_id,)
+        ).fetchone()
+        if not row:
+            return _error("NOT_FOUND", "Comment not found.", 404)
+        if request.method == "PATCH":
+            if row["user_id"] != g.api_user["id"]:
+                return _error("FORBIDDEN", "Only the author can edit this comment.", 403)
+            body = (_json_body() or {}).get("body", "")
+            if not isinstance(body, str) or not body.strip() or len(body.strip()) > MAX_COMMENT_LENGTH:
+                return _error("VALIDATION_ERROR", "Comment length is invalid.", 422)
+            conn.execute("UPDATE comments SET body=?, updated_at=? WHERE id=?", (body.strip(), _now_iso(), comment_id))
+            return jsonify(dict(conn.execute("SELECT * FROM comments WHERE id=?", (comment_id,)).fetchone()))
+        if row["user_id"] != g.api_user["id"] and row["recipe_owner"] != g.api_user["id"]:
+            return _error("FORBIDDEN", "Only the author or owner can delete this comment.", 403)
+        conn.execute("UPDATE comments SET deleted_at=? WHERE id=?", (_now_iso(), comment_id))
+    return ("", 204)
+
+
+@bp.route("/activity")
+@_require_token
+def api_activity():
+    page = max(1, request.args.get("page", 1, type=int))
+    page_size = min(50, max(1, request.args.get("page_size", 20, type=int)))
+    offset = (page - 1) * page_size
+    with db_connect() as conn:
+        total = conn.execute(
+            "SELECT COUNT(*) FROM activity_events e LEFT JOIN recipes r ON r.id=e.recipe_id WHERE e.recipe_id IS NULL OR r.visibility='shared_epn' OR r.owner_id=?",
+            (g.api_user["id"],),
+        ).fetchone()[0]
+        rows = conn.execute(
+            "SELECT e.* FROM activity_events e LEFT JOIN recipes r ON r.id=e.recipe_id WHERE e.recipe_id IS NULL OR r.visibility='shared_epn' OR r.owner_id=? ORDER BY e.created_at DESC LIMIT ? OFFSET ?",
+            (g.api_user["id"], page_size, offset),
+        ).fetchall()
+        return jsonify(
+            {
+                "data": [dict(r) for r in rows],
+                "pagination": {
+                    "page": page,
+                    "page_size": page_size,
+                    "total_items": total,
+                    "total_pages": (total + page_size - 1) // page_size,
+                },
+            }
+        )

@@ -130,6 +130,68 @@ class ApiFoundationTests(unittest.TestCase):
         self.assertEqual(invalid.status_code, 422)
         self.assertEqual(invalid.get_json()["error"]["code"], "VALIDATION_ERROR")
 
+    def test_recipe_visibility_is_shared_by_default_and_private_is_owner_only(self):
+        token = self.login()
+        created = self.create_recipe(token, title="Community Card")
+        self.assertEqual(created["visibility"], "shared_epn")
+        other_id = self.recipe_app.create_account("other@example.com", "correct-horse")
+        self.recipe_app.update_profile(other_id, "Other Cook", "", "")
+        other_login = self.client.post("/api/v1/auth/login", json={"email": "other@example.com", "password": "correct-horse"})
+        other_token = other_login.get_json()["token"]
+        hidden = self.client.get("/api/v1/recipes", headers={"Authorization": f"Bearer {other_token}"})
+        self.assertEqual(hidden.status_code, 200)
+        self.assertEqual(hidden.get_json()["pagination"]["total_items"], 1)
+        changed = self.client.patch(
+            f"/api/v1/recipes/{created['id']}",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"visibility": "shared_epn"},
+        )
+        self.assertEqual(changed.status_code, 200)
+        private = self.client.patch(
+            f"/api/v1/recipes/{created['id']}", headers={"Authorization": f"Bearer {token}"}, json={"visibility": "private"}
+        )
+        self.assertEqual(private.status_code, 200)
+        hidden = self.client.get("/api/v1/recipes", headers={"Authorization": f"Bearer {other_token}"})
+        self.assertEqual(hidden.get_json()["pagination"]["total_items"], 0)
+        for forbidden in ("public", "selected_users"):
+            rejected = self.client.patch(
+                f"/api/v1/recipes/{created['id']}",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"visibility": forbidden},
+            )
+            self.assertEqual(rejected.status_code, 422)
+
+    def test_archive_is_per_user_and_collections_comments_activity_have_lifecycle(self):
+        token = self.login()
+        created = self.create_recipe(token, title="Stateful Card")
+        recipe_id = created["id"]
+        self.assertEqual(
+            self.client.post(f"/api/v1/recipes/{recipe_id}/archive", headers={"Authorization": f"Bearer {token}"}).status_code, 204
+        )
+        self.assertEqual(self.client.get("/api/v1/recipes", headers={"Authorization": f"Bearer {token}"}).status_code, 200)
+        collection = self.client.post(
+            "/api/v1/collections", headers={"Authorization": f"Bearer {token}"}, json={"name": "Weeknight", "visibility": "shared_epn"}
+        )
+        self.assertEqual(collection.status_code, 201)
+        collection_id = collection.get_json()["id"]
+        added = self.client.post(
+            f"/api/v1/collections/{collection_id}/recipes", headers={"Authorization": f"Bearer {token}"}, json={"recipe_id": recipe_id}
+        )
+        self.assertEqual(added.status_code, 204)
+        comment = self.client.post(
+            f"/api/v1/recipes/{recipe_id}/comments", headers={"Authorization": f"Bearer {token}"}, json={"body": "Nice"}
+        )
+        self.assertEqual(comment.status_code, 201)
+        comment_id = comment.get_json()["id"]
+        edited = self.client.patch(f"/api/v1/comments/{comment_id}", headers={"Authorization": f"Bearer {token}"}, json={"body": "Updated"})
+        self.assertEqual(edited.status_code, 200)
+        self.assertEqual(
+            self.client.delete(f"/api/v1/comments/{comment_id}", headers={"Authorization": f"Bearer {token}"}).status_code, 204
+        )
+        feed = self.client.get("/api/v1/activity", headers={"Authorization": f"Bearer {token}"})
+        self.assertEqual(feed.status_code, 200)
+        self.assertGreaterEqual(len(feed.get_json()["data"]), 4)
+
 
 if __name__ == "__main__":
     unittest.main()

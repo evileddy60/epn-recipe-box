@@ -137,6 +137,87 @@ paths:
                 properties:
                   data: { type: array, items: { $ref: '#/components/schemas/TaxonomyItem' } }
         '401': { $ref: '#/components/responses/AuthRequired' }
+  /collections:
+    get:
+      summary: List visible collections
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: Collections, content: { application/json: { schema: { type: object, properties: { data: { type: array, items: { $ref: '#/components/schemas/Collection' } } } } } } }
+    post:
+      summary: Create a collection
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/CollectionRequest' } } }
+      responses:
+        '201': { description: Created collection, content: { application/json: { schema: { $ref: '#/components/schemas/Collection' } } } }
+        '401': { $ref: '#/components/responses/AuthRequired' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+  /collections/{collection_id}:
+    get:
+      summary: Get a visible collection and its recipes
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/CollectionId' }]
+      responses:
+        '200': { description: Collection, content: { application/json: { schema: { $ref: '#/components/schemas/Collection' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      summary: Rename or change collection visibility
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/CollectionId' }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/CollectionRequest' } } }
+      responses:
+        '200': { description: Updated collection, content: { application/json: { schema: { $ref: '#/components/schemas/Collection' } } } }
+        '403': { $ref: '#/components/responses/AuthRequired' }
+    delete:
+      summary: Delete an empty collection
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/CollectionId' }]
+      responses:
+        '204': { description: Deleted }
+        '409': { description: Collection is not empty }
+  /collections/{collection_id}/recipes/{recipe_id}:
+    post:
+      summary: Add a recipe to a collection
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/CollectionId' }, { $ref: '#/components/parameters/RecipeId' }]
+      responses: { '204': { description: Membership added } }
+    delete:
+      summary: Remove a recipe from a collection
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/CollectionId' }, { $ref: '#/components/parameters/RecipeId' }]
+      responses: { '204': { description: Membership removed } }
+  /recipes/{recipe_id}/comments:
+    get:
+      summary: List visible comments
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/RecipeId' }]
+      responses: { '200': { description: Comments } }
+    post:
+      summary: Add a comment
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/RecipeId' }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [body], properties: { body: { type: string, maxLength: 2000 } } } } } }
+      responses: { '201': { description: Created comment } }
+  /comments/{comment_id}:
+    patch:
+      summary: Edit own comment
+      security: [{ bearerAuth: [] }]
+      parameters: [{ name: comment_id, in: path, required: true, schema: { type: string } }]
+      responses: { '200': { description: Updated comment } }
+    delete:
+      summary: Delete own comment or hide as recipe owner
+      security: [{ bearerAuth: [] }]
+      parameters: [{ name: comment_id, in: path, required: true, schema: { type: string } }]
+      responses: { '204': { description: Deleted or hidden } }
+  /activity:
+    get:
+      summary: Paginated privacy-filtered activity feed
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/Page' }, { $ref: '#/components/parameters/PageSize' }]
+      responses: { '200': { description: Activity feed } }
 components:
   securitySchemes:
     bearerAuth:
@@ -149,6 +230,11 @@ components:
       in: path
       required: true
       schema: { type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$' }
+    CollectionId:
+      name: collection_id
+      in: path
+      required: true
+      schema: { type: string, pattern: '^col-[A-Za-z0-9-]{1,127}$' }
     Page:
       name: page
       in: query
@@ -231,6 +317,21 @@ components:
         steps: { type: array, maxItems: 500, items: { type: string, minLength: 1, maxLength: 2000 } }
         category: { type: string, maxLength: 40 }
         tags: { type: array, maxItems: 12, items: { type: string, minLength: 1, maxLength: 40 } }
+    CollectionRequest:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 120 }
+        visibility: { type: string, enum: [private, shared_epn], default: private }
+    Collection:
+      type: object
+      required: [id, owner_id, name, visibility]
+      properties:
+        id: { type: string }
+        owner_id: { type: string }
+        name: { type: string }
+        visibility: { type: string, enum: [private, shared_epn] }
+        recipes: { type: array, items: { $ref: '#/components/schemas/Recipe' } }
     Recipe:
       type: object
       required: [id, title, summary, prep_time, servings, ingredients, steps, category, tags, image, creator, created_at, updated_at]

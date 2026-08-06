@@ -26,6 +26,23 @@ def health():
     return jsonify({"status": "ok", "database": "ok", "schema_version": schema_version(DB_FILE)})
 
 
+@bp.route("/activity")
+def activity():
+    data = load_data(user_id=session.get("user_id", ""))
+    user = current_user(data)
+    if not user:
+        return redirect(url_for("signup"))
+    with db_connect() as conn:
+        events = [
+            dict(row)
+            for row in conn.execute(
+                "SELECT e.* FROM activity_events e LEFT JOIN recipes r ON r.id=e.recipe_id WHERE e.recipe_id IS NULL OR r.visibility='shared_epn' OR r.owner_id=? ORDER BY e.created_at DESC LIMIT 50",
+                (user["id"],),
+            )
+        ]
+    return render_template("activity.html", title=APP_TITLE, user=user, events=events, active="activity")
+
+
 @bp.route("/uploads/<path:filename>")
 def uploaded_file(filename):
     return send_from_directory(_config.UPLOAD_DIR, filename)
@@ -33,6 +50,12 @@ def uploaded_file(filename):
 
 @bp.route("/recipe-images/<path:filename>")
 def recipe_image(filename):
+    data = load_data(user_id=session.get("user_id", ""))
+    if not current_user(data):
+        return redirect(url_for("signup"))
+    recipe = next((item for item in data["recipes"] if item.get("image_filename") == filename), None)
+    if not recipe:
+        return jsonify({"error": {"code": "NOT_FOUND", "message": "Recipe image not found."}}), 404
     return send_from_directory(_config.RECIPE_IMAGE_DIR, filename)
 
 
@@ -364,7 +387,12 @@ def archive_recipe(recipe_id):
     recipe = next((item for item in data["recipes"] if item["id"] == recipe_id), None)
     if not user or not recipe or recipe["owner_id"] != user["id"]:
         return redirect(url_for("recipe_detail", recipe_id=recipe_id))
-    set_recipe_archived(recipe_id, True)
+    set_recipe_archived(recipe_id, True, user["id"])
+    with db_connect() as conn:
+        conn.execute(
+            "INSERT INTO recipe_user_state(user_id, recipe_id, is_archived, archived_at, created_at, updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(user_id, recipe_id) DO UPDATE SET is_archived=1, archived_at=excluded.archived_at, updated_at=excluded.updated_at",
+            (user["id"], recipe_id, 1, now_iso(), now_iso(), now_iso()),
+        )
     flash("Recipe archived. It remains available in Archived recipes.")
     return redirect(url_for("index"))
 
@@ -376,7 +404,12 @@ def restore_recipe(recipe_id):
     recipe = next((item for item in data["recipes"] if item["id"] == recipe_id), None)
     if not user or not recipe or recipe["owner_id"] != user["id"]:
         return redirect(url_for("recipe_detail", recipe_id=recipe_id))
-    set_recipe_archived(recipe_id, False)
+    set_recipe_archived(recipe_id, False, user["id"])
+    with db_connect() as conn:
+        conn.execute(
+            "UPDATE recipe_user_state SET is_archived=0, archived_at=NULL, updated_at=? WHERE user_id=? AND recipe_id=?",
+            (now_iso(), user["id"], recipe_id),
+        )
     flash("Recipe restored to the recipe box.")
     return redirect(url_for("recipe_detail", recipe_id=recipe_id))
 

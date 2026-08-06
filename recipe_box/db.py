@@ -17,6 +17,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 from sync import token_hash
 from .config import *
 from .migrations import migrate_database, schema_version
+from .policies import can_view_recipe, normalize_visibility
 
 CATEGORY_DEFAULTS = (
     ("breakfast", "Breakfast"),
@@ -342,6 +343,7 @@ def row_to_recipe(
     comments: list[dict] | None = None,
     tags: list[dict] | None = None,
     favorite: bool = False,
+    archived: bool = False,
 ) -> dict:
     category_key = row["category_key"] if "category_key" in row.keys() else ""
     return {
@@ -368,7 +370,9 @@ def row_to_recipe(
         "image_size": row["image_size"] if "image_size" in row.keys() else 0,
         "image_sha256": row["image_sha256"] if "image_sha256" in row.keys() else "",
         "archived_at": row["archived_at"] if "archived_at" in row.keys() else None,
+        "visibility": row["visibility"] if "visibility" in row.keys() else "private",
         "favorite": favorite,
+        "archived": archived,
     }
 
 
@@ -386,9 +390,9 @@ def load_data(
         users = [row_to_user(row, inventory_by_user.get(row["id"], [])) for row in conn.execute("SELECT * FROM users ORDER BY created_at")]
         query = """
             SELECT r.* FROM recipes r JOIN users owner ON owner.id = r.owner_id
-            WHERE 1 = 1
+            WHERE (r.owner_id = ? OR r.visibility = 'shared_epn')
         """
-        params = []
+        params = [user_id]
         if search:
             needle = f"%{search.lower()}%"
             query += """ AND (
@@ -403,13 +407,9 @@ def load_data(
         if tag:
             query += " AND EXISTS (SELECT 1 FROM recipe_tags fr_rt JOIN tags fr_t ON fr_t.id = fr_rt.tag_id WHERE fr_rt.recipe_id = r.id AND fr_t.normalized_name = ?)"
             params.append(tag)
-        if archived is True:
-            query += " AND r.archived_at IS NOT NULL"
-        elif archived is False:
-            query += " AND r.archived_at IS NULL"
         if favorites:
-            query += " AND EXISTS (SELECT 1 FROM favorites f_filter WHERE f_filter.recipe_id = r.id AND f_filter.user_id = ?)"
-            params.append(user_id)
+            query += " AND (EXISTS (SELECT 1 FROM favorites f_filter WHERE f_filter.recipe_id = r.id AND f_filter.user_id = ?) OR EXISTS (SELECT 1 FROM recipe_user_state sf WHERE sf.recipe_id = r.id AND sf.user_id = ? AND sf.is_favorite = 1))"
+            params.extend([user_id, user_id])
         query += " ORDER BY r.created_at DESC"
         recipe_rows = conn.execute(query, params).fetchall()
         recipe_ids = [row["id"] for row in recipe_rows]
@@ -432,8 +432,14 @@ def load_data(
                 {"id": row["id"], "user_id": row["user_id"], "body": row["body"], "created_at": row["created_at"]}
             )
         favorite_ids = set()
+        archived_ids = set()
         if user_id:
             favorite_ids = {row["recipe_id"] for row in conn.execute("SELECT recipe_id FROM favorites WHERE user_id = ?", (user_id,))}
+            state_rows = conn.execute(
+                "SELECT recipe_id, is_favorite, is_archived FROM recipe_user_state WHERE user_id = ?", (user_id,)
+            ).fetchall()
+            favorite_ids.update(row["recipe_id"] for row in state_rows if row["is_favorite"])
+            archived_ids = {row["recipe_id"] for row in state_rows if row["is_archived"]}
         recipes = [
             row_to_recipe(
                 row,
@@ -441,9 +447,12 @@ def load_data(
                 comments_by_recipe.get(row["id"], []),
                 tags_by_recipe.get(row["id"], []),
                 row["id"] in favorite_ids,
+                row["id"] in archived_ids,
             )
             for row in recipe_rows
         ]
+        if user_id:
+            recipes = [recipe for recipe in recipes if recipe["archived"] is (archived is True)]
         categories = [dict(row) for row in conn.execute("SELECT category_key, display_name FROM categories ORDER BY display_name")]
         tags = [dict(row) for row in conn.execute("SELECT normalized_name, display_name FROM tags ORDER BY normalized_name")]
     return {
@@ -563,15 +572,16 @@ def create_recipe(owner_id: str, form, image_meta: dict | None = None) -> str:
     recipe_id = f"r-{uuid.uuid4().hex[:10]}"
     timestamp = now_iso()
     category = normalize_category(form.get("category", ""))
+    visibility = normalize_visibility(form.get("visibility"))
     with db_connect() as conn:
         conn.execute(
             """
             INSERT INTO recipes (
                 id, owner_id, title, summary, prep_time, servings,
                 ingredients_json, steps_json, category_key, created_at, updated_at,
-                image_filename, image_media_type, image_width, image_height, image_size, image_sha256
+                image_filename, image_media_type, image_width, image_height, image_size, image_sha256, visibility
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 recipe_id,
@@ -591,6 +601,7 @@ def create_recipe(owner_id: str, form, image_meta: dict | None = None) -> str:
                 (image_meta or {}).get("image_height", 0),
                 (image_meta or {}).get("image_size", 0),
                 (image_meta or {}).get("image_sha256", ""),
+                visibility,
             ),
         )
         replace_recipe_tags(conn, recipe_id, form.get("tags", ""))
@@ -602,8 +613,8 @@ def insert_imported_recipe(owner_id: str, recipe: dict, source_installation_id: 
     with db_connect() as conn:
         conn.execute(
             """
-            INSERT INTO recipes (id, owner_id, title, summary, prep_time, servings, ingredients_json, steps_json, category_key, created_at, updated_at, sync_source_installation_id, image_filename, image_media_type, image_width, image_height, image_size, image_sha256)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', '', 0, 0, 0, '')
+            INSERT INTO recipes (id, owner_id, title, summary, prep_time, servings, ingredients_json, steps_json, category_key, created_at, updated_at, sync_source_installation_id, image_filename, image_media_type, image_width, image_height, image_size, image_sha256, visibility)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', '', 0, 0, 0, '', 'shared_epn')
             """,
             (
                 imported_id,
@@ -654,6 +665,7 @@ def update_recipe(recipe_id: str, form, image_meta: dict | None = None) -> None:
     if len(summary) > MAX_RECIPE_SUMMARY or len(ingredients) > MAX_RECIPE_INGREDIENTS or len(steps) > MAX_RECIPE_STEPS:
         raise ValueError("Recipe text is too long.")
     category = normalize_category(form.get("category", ""))
+    visibility = normalize_visibility(form.get("visibility"))
     with db_connect() as conn:
         conn.execute(
             """
@@ -662,7 +674,7 @@ def update_recipe(recipe_id: str, form, image_meta: dict | None = None) -> None:
                 ingredients_json = ?, steps_json = ?, category_key = ?, updated_at = ?,
                 image_filename = COALESCE(?, image_filename), image_media_type = COALESCE(?, image_media_type),
                 image_width = COALESCE(?, image_width), image_height = COALESCE(?, image_height),
-                image_size = COALESCE(?, image_size), image_sha256 = COALESCE(?, image_sha256)
+                image_size = COALESCE(?, image_size), image_sha256 = COALESCE(?, image_sha256), visibility = ?
             WHERE id = ?
             """,
             (
@@ -680,6 +692,7 @@ def update_recipe(recipe_id: str, form, image_meta: dict | None = None) -> None:
                 (image_meta or {}).get("image_height"),
                 (image_meta or {}).get("image_size"),
                 (image_meta or {}).get("image_sha256"),
+                visibility,
                 recipe_id,
             ),
         )
@@ -696,11 +709,18 @@ def toggle_favorite(user_id: str, recipe_id: str) -> bool:
         return True
 
 
-def set_recipe_archived(recipe_id: str, archived: bool) -> None:
+def set_recipe_archived(recipe_id: str, archived: bool, user_id: str | None = None) -> None:
     with db_connect() as conn:
-        conn.execute(
-            "UPDATE recipes SET archived_at = ?, updated_at = ? WHERE id = ?", (now_iso() if archived else None, now_iso(), recipe_id)
-        )
+        stamp = now_iso() if archived else None
+        if user_id:
+            conn.execute(
+                """INSERT INTO recipe_user_state(user_id, recipe_id, is_archived, archived_at, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(user_id, recipe_id) DO UPDATE SET is_archived=excluded.is_archived,
+                archived_at=excluded.archived_at, updated_at=excluded.updated_at""",
+                (user_id, recipe_id, int(archived), stamp, now_iso(), now_iso()),
+            )
+        else:
+            conn.execute("UPDATE recipes SET archived_at = ?, updated_at = ? WHERE id = ?", (stamp, now_iso(), recipe_id))
 
 
 def save_rating(recipe_id: str, user_id: str, score: int) -> None:

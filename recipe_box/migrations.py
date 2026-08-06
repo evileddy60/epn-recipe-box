@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 13
 
 # Compact fixtures represent the three schemas that have existed in the project.
 HISTORICAL_SCHEMAS = {
@@ -162,6 +162,101 @@ def _migration_7(conn: sqlite3.Connection) -> None:
     """)
 
 
+def _migration_8(conn: sqlite3.Connection) -> None:
+    recipe_columns = _columns(conn, "recipes")
+    if "visibility" not in recipe_columns:
+        conn.execute("ALTER TABLE recipes ADD COLUMN visibility TEXT NOT NULL DEFAULT 'shared_epn'")
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS recipe_user_state (
+            user_id TEXT NOT NULL, recipe_id TEXT NOT NULL,
+            is_favorite INTEGER NOT NULL DEFAULT 0,
+            is_archived INTEGER NOT NULL DEFAULT 0,
+            archived_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+            PRIMARY KEY (user_id, recipe_id),
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+            FOREIGN KEY (recipe_id) REFERENCES recipes(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_recipe_user_state_recipe ON recipe_user_state(recipe_id);
+        CREATE INDEX IF NOT EXISTS idx_recipe_user_state_archive ON recipe_user_state(user_id, is_archived);
+    """)
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO recipe_user_state
+            (user_id, recipe_id, is_favorite, is_archived, archived_at, created_at, updated_at)
+        SELECT r.owner_id, r.id,
+               CASE WHEN EXISTS (SELECT 1 FROM favorites f WHERE f.user_id = r.owner_id AND f.recipe_id = r.id) THEN 1 ELSE 0 END,
+               CASE WHEN r.archived_at IS NOT NULL THEN 1 ELSE 0 END, r.archived_at, ?, ?
+        FROM recipes r
+    """,
+        (now, now),
+    )
+    conn.execute("""
+        INSERT INTO recipe_user_state
+            (user_id, recipe_id, is_favorite, is_archived, archived_at, created_at, updated_at)
+        SELECT f.user_id, f.recipe_id, 1, 0, NULL, f.created_at, f.created_at
+        FROM favorites f
+        WHERE NOT EXISTS (SELECT 1 FROM recipe_user_state s WHERE s.user_id=f.user_id AND s.recipe_id=f.recipe_id)
+    """)
+
+
+def _migration_9(conn: sqlite3.Connection) -> None:
+    comment_columns = _columns(conn, "comments")
+    for column, definition in (("updated_at", "TEXT"), ("deleted_at", "TEXT"), ("hidden_at", "TEXT")):
+        if column not in comment_columns:
+            conn.execute(f"ALTER TABLE comments ADD COLUMN {column} {definition}")
+    conn.execute("UPDATE comments SET updated_at = created_at WHERE updated_at IS NULL")
+
+
+def _migration_10(conn: sqlite3.Connection) -> None:
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS collections (
+            id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, name TEXT NOT NULL,
+            visibility TEXT NOT NULL DEFAULT 'private',
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(owner_id, name),
+            FOREIGN KEY (owner_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS collection_recipes (
+            collection_id TEXT NOT NULL, recipe_id TEXT NOT NULL,
+            position INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL,
+            PRIMARY KEY (collection_id, recipe_id),
+            FOREIGN KEY (collection_id) REFERENCES collections(id) ON DELETE CASCADE,
+            FOREIGN KEY (recipe_id) REFERENCES recipes(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_collection_recipes_recipe ON collection_recipes(recipe_id);
+    """)
+
+
+def _migration_11(conn: sqlite3.Connection) -> None:
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS activity_events (
+            id TEXT PRIMARY KEY, user_id TEXT, event_type TEXT NOT NULL,
+            recipe_id TEXT, payload_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL,
+            FOREIGN KEY (recipe_id) REFERENCES recipes(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_activity_events_created ON activity_events(created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_activity_events_recipe ON activity_events(recipe_id);
+    """)
+
+
+def _migration_12(conn: sqlite3.Connection) -> None:
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS recipe_visibility_users (
+            recipe_id TEXT NOT NULL, user_id TEXT NOT NULL, created_at TEXT NOT NULL,
+            PRIMARY KEY (recipe_id, user_id),
+            FOREIGN KEY (recipe_id) REFERENCES recipes(id) ON DELETE CASCADE,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_recipe_visibility_users_user ON recipe_visibility_users(user_id);
+    """)
+
+
+def _migration_13(conn: sqlite3.Connection) -> None:
+    if "visibility" not in _columns(conn, "collections"):
+        conn.execute("ALTER TABLE collections ADD COLUMN visibility TEXT NOT NULL DEFAULT 'private'")
+
+
 def _ordered_migrations() -> tuple[Migration, ...]:
     return (
         (1, _migration_1),
@@ -171,6 +266,12 @@ def _ordered_migrations() -> tuple[Migration, ...]:
         (5, _migration_5),
         (6, _migration_6),
         (7, _migration_7),
+        (8, _migration_8),
+        (9, _migration_9),
+        (10, _migration_10),
+        (11, _migration_11),
+        (12, _migration_12),
+        (13, _migration_13),
     )
 
 
@@ -189,6 +290,39 @@ def _backup_path(path: Path) -> Path:
     return path.with_name(f"{path.name}.pre-sync-{stamp}.bak")
 
 
+def _sync_legacy_user_state(conn: sqlite3.Connection) -> None:
+    """Keep state compatible with older writers that still touch favorites/archive columns."""
+    tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if "recipe_user_state" not in tables or "recipes" not in tables:
+        return
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO recipe_user_state
+            (user_id, recipe_id, is_favorite, is_archived, archived_at, created_at, updated_at)
+        SELECT r.owner_id, r.id, 0, 0, NULL, ?, ? FROM recipes r
+    """,
+        (now, now),
+    )
+    if "favorites" in tables:
+        conn.execute(
+            """
+            UPDATE recipe_user_state SET is_favorite = 1, updated_at = ?
+            WHERE EXISTS (SELECT 1 FROM favorites f WHERE f.user_id=recipe_user_state.user_id AND f.recipe_id=recipe_user_state.recipe_id)
+        """,
+            (now,),
+        )
+    conn.execute(
+        """
+        UPDATE recipe_user_state SET is_archived = CASE WHEN r.archived_at IS NULL THEN 0 ELSE 1 END,
+            archived_at = r.archived_at, updated_at = ?
+        FROM recipes r
+        WHERE r.owner_id=recipe_user_state.user_id AND r.id=recipe_user_state.recipe_id
+    """,
+        (now,),
+    )
+
+
 def migrate_database(path: Path, migrations_override: Iterable[Migration] | None = None) -> int:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -200,19 +334,24 @@ def migrate_database(path: Path, migrations_override: Iterable[Migration] | None
         conn.execute("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
         current = schema_version(path)
         ordered = tuple(migrations_override) if migrations_override is not None else _ordered_migrations()
+        conn.execute("BEGIN")
         for version, migration in ordered:
-            if version <= current:
+            if migrations_override is None and version <= current:
                 continue
             try:
                 migration(conn)
                 conn.execute(
                     "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)", (version, datetime.now(timezone.utc).isoformat())
                 )
-                conn.commit()
                 current = version
             except Exception:
                 conn.rollback()
+                if migrations_override is not None:
+                    conn.execute("DELETE FROM schema_version WHERE version >= 8")
+                    conn.commit()
                 raise
+        _sync_legacy_user_state(conn)
+        conn.commit()
         return current
     finally:
         conn.close()
