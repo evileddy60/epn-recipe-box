@@ -4,7 +4,7 @@ set -Eeuo pipefail
 # Controlled EPN Recipe Box deployment wrapper.
 # All paths may be overridden for isolated tests; production defaults are explicit.
 SERVICE_NAME="${EPN_RECIPE_BOX_SERVICE:-epn-recipe-box.service}"
-REPO_DIR="${EPN_RECIPE_BOX_REPO:-/home/epn/work/epn-recipe-box-sync}"
+REPO_DIR="${EPN_RECIPE_BOX_REPO:-/opt/epn-recipe-box}"
 DATA_DIR="${EPN_RECIPE_BOX_DATA_DIR:-/var/lib/epn-recipe-box}"
 BACKUP_ROOT="${EPN_RECIPE_BOX_BACKUP_ROOT:-/var/backups/epn-recipe-box}"
 HEALTH_URL="${EPN_RECIPE_BOX_HEALTH_URL:-http://127.0.0.1:5055/api/v1/health}"
