@@ -13,6 +13,7 @@ from sync import token_hash
 from . import config as _config
 from .config import *
 from .db import *
+from .domain import remove_recipe_image, save_avatar, save_recipe_image
 from .security import login_allowed, login_retry_after, record_login_failure, record_login_success
 from .policies import can_delete_comment, can_edit_comment, can_hide_comment, can_unhide_comment
 
@@ -51,7 +52,7 @@ def _json_body() -> dict | None:
 
 
 def _user_payload(row: sqlite3.Row | dict) -> dict:
-    return {"id": row["id"], "email": row["email"], "nickname": row["nickname"], "bio": row["bio"]}
+    return {"id": row["id"], "email": row["email"], "nickname": row["nickname"], "bio": row["bio"], "avatar": row["avatar"]}
 
 
 def _recipe_payload(row: sqlite3.Row | dict, conn: sqlite3.Connection) -> dict:
@@ -100,7 +101,7 @@ def _require_token(view):
             row = conn.execute(
                 """
                 SELECT t.id AS token_id, t.user_id, t.expires_at, t.revoked_at,
-                       u.id, u.email, u.nickname, u.bio
+                       u.id, u.email, u.nickname, u.bio, u.avatar
                 FROM api_tokens t JOIN users u ON u.id = t.user_id
                 WHERE t.token_hash = ?
                 """,
@@ -218,10 +219,51 @@ def logout():
     return ("", 204)
 
 
-@bp.route("/me")
+@bp.route("/me", methods=["GET", "PATCH"])
 @_require_token
 def me():
+    if request.method == "PATCH":
+        payload = _json_body()
+        if payload is None or not payload:
+            return _error("VALIDATION_ERROR", "A profile update object is required.", 422)
+        allowed = {"nickname", "bio"}
+        unknown = sorted(set(payload) - allowed)
+        if unknown:
+            return _error("VALIDATION_ERROR", "Unsupported profile fields.", 422, {"fields": unknown})
+        with db_connect() as conn:
+            row = conn.execute("SELECT nickname, bio FROM users WHERE id = ?", (g.api_user["id"],)).fetchone()
+        nickname = payload.get("nickname", row["nickname"])
+        bio = payload.get("bio", row["bio"])
+        if not isinstance(nickname, str) or not isinstance(bio, str):
+            return _error("VALIDATION_ERROR", "Nickname and bio must be strings.", 422)
+        try:
+            update_profile(g.api_user["id"], nickname, bio, "")
+        except ValueError as exc:
+            return _error("VALIDATION_ERROR", str(exc), 422)
+        with db_connect() as conn:
+            row = conn.execute("SELECT * FROM users WHERE id = ?", (g.api_user["id"],)).fetchone()
+        return jsonify(_user_payload(row))
     return jsonify(_user_payload(g.api_user))
+
+
+@bp.route("/me/avatar", methods=["PUT"])
+@_require_token
+def update_avatar():
+    try:
+        avatar_path = save_avatar(request.files.get("avatar"))
+        if not avatar_path:
+            return _error("VALIDATION_ERROR", "An avatar image is required.", 422)
+        with db_connect() as conn:
+            old = conn.execute("SELECT avatar FROM users WHERE id = ?", (g.api_user["id"],)).fetchone()["avatar"]
+            conn.execute("UPDATE users SET avatar = ? WHERE id = ?", (avatar_path, g.api_user["id"]))
+            row = conn.execute("SELECT * FROM users WHERE id = ?", (g.api_user["id"],)).fetchone()
+        if old and old != avatar_path and old.startswith("uploads/"):
+            target = old.removeprefix("uploads/")
+            if target:
+                (_config.UPLOAD_DIR / target).unlink(missing_ok=True)
+        return jsonify(_user_payload(row))
+    except ValueError as exc:
+        return _error("VALIDATION_ERROR", str(exc), 422)
 
 
 def _recipe_query_filters():
@@ -320,7 +362,10 @@ def recipe(recipe_id: str):
 @_require_token
 def recipe_image(recipe_id: str):
     with db_connect() as conn:
-        row = conn.execute("SELECT image_filename FROM recipes WHERE id = ? AND archived_at IS NULL", (recipe_id,)).fetchone()
+        row = conn.execute(
+            "SELECT image_filename FROM recipes WHERE id = ? AND archived_at IS NULL AND (owner_id = ? OR visibility = 'shared_epn')",
+            (recipe_id, g.api_user["id"]),
+        ).fetchone()
     if not row or not row["image_filename"]:
         return _error("NOT_FOUND", "Recipe image not found.", 404)
     return send_from_directory(_config.RECIPE_IMAGE_DIR, row["image_filename"])
@@ -469,6 +514,53 @@ def api_update_recipe(recipe_id):
             (g.api_user["id"], g.api_user["id"], recipe_id),
         ).fetchone()
         return jsonify(_recipe_payload(row, conn))
+
+
+@bp.route("/recipes/<recipe_id>/image", methods=["PUT"])
+@_require_token
+def update_recipe_image(recipe_id: str):
+    upload = request.files.get("image")
+    if not upload or not upload.filename:
+        return _error("VALIDATION_ERROR", "An image file is required.", 422)
+    with db_connect() as conn:
+        row = conn.execute("SELECT * FROM recipes WHERE id = ?", (recipe_id,)).fetchone()
+    if not row:
+        return _error("NOT_FOUND", "Recipe not found.", 404)
+    if row["owner_id"] != g.api_user["id"]:
+        return _error("FORBIDDEN", "Only the recipe owner can replace its image.", 403)
+    old_filename = row["image_filename"]
+    image_meta = {}
+    try:
+        image_meta = save_recipe_image(upload)
+        with db_connect() as conn:
+            conn.execute(
+                "UPDATE recipes SET image_filename=?, image_media_type=?, image_width=?, image_height=?, image_size=?, image_sha256=?, updated_at=? WHERE id=? AND owner_id=?",
+                (
+                    image_meta["image_filename"],
+                    image_meta["image_media_type"],
+                    image_meta["image_width"],
+                    image_meta["image_height"],
+                    image_meta["image_size"],
+                    image_meta["image_sha256"],
+                    _now_iso(),
+                    recipe_id,
+                    g.api_user["id"],
+                ),
+            )
+            updated = conn.execute(
+                "SELECT r.*, owner.nickname AS owner_nickname, EXISTS (SELECT 1 FROM favorites f WHERE f.recipe_id=r.id AND f.user_id=?) AS favorite, COALESCE(state.is_archived,0) AS archived FROM recipes r JOIN users owner ON owner.id=r.owner_id LEFT JOIN recipe_user_state state ON state.recipe_id=r.id AND state.user_id=? WHERE r.id=?",
+                (g.api_user["id"], g.api_user["id"], recipe_id),
+            ).fetchone()
+            response = _recipe_payload(updated, conn)
+        if old_filename and old_filename != image_meta["image_filename"]:
+            remove_recipe_image(old_filename)
+        return jsonify(response)
+    except ValueError as exc:
+        remove_recipe_image(image_meta.get("image_filename", ""))
+        return _error("VALIDATION_ERROR", str(exc), 422)
+    except Exception:
+        remove_recipe_image(image_meta.get("image_filename", ""))
+        raise
 
 
 @bp.route("/collections", methods=["GET", "POST"])

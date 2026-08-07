@@ -70,6 +70,35 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/User' }
         '401': { $ref: '#/components/responses/AuthRequired' }
+    patch:
+      summary: Update editable fields on the authenticated profile
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ProfileUpdateRequest' }
+      responses:
+        '200': { description: Updated profile, content: { application/json: { schema: { $ref: '#/components/schemas/User' } } } }
+        '401': { $ref: '#/components/responses/AuthRequired' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+  /me/avatar:
+    put:
+      summary: Replace the authenticated user's avatar
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [avatar]
+              properties:
+                avatar: { type: string, format: binary }
+      responses:
+        '200': { description: Updated profile, content: { application/json: { schema: { $ref: '#/components/schemas/User' } } } }
+        '401': { $ref: '#/components/responses/AuthRequired' }
+        '422': { $ref: '#/components/responses/ValidationError' }
   /recipes:
     get:
       summary: List recipes
@@ -144,6 +173,25 @@ paths:
         '200': { description: Recipe image }
         '401': { $ref: '#/components/responses/AuthRequired' }
         '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      summary: Upload or replace an owned recipe image
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/RecipeId' }]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [image]
+              properties:
+                image: { type: string, format: binary }
+      responses:
+        '200': { description: Updated recipe, content: { application/json: { schema: { $ref: '#/components/schemas/Recipe' } } } }
+        '401': { $ref: '#/components/responses/AuthRequired' }
+        '403': { description: Caller is not the recipe owner }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationError' }
   /categories:
     get:
       summary: List recipe categories
@@ -361,12 +409,20 @@ components:
         user: { $ref: '#/components/schemas/User' }
     User:
       type: object
-      required: [id, email, nickname, bio]
+      required: [id, email, nickname, bio, avatar]
       properties:
         id: { type: string }
         email: { type: string, format: email }
         nickname: { type: string }
         bio: { type: string }
+        avatar: { type: string }
+    ProfileUpdateRequest:
+      type: object
+      minProperties: 1
+      additionalProperties: false
+      properties:
+        nickname: { type: string, minLength: 1, maxLength: 80 }
+        bio: { type: string, maxLength: 2000 }
     CreateRecipeRequest:
       type: object
       required: [title, summary, ingredients, steps, category, tags]

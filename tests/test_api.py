@@ -13,10 +13,16 @@ class ApiFoundationTests(unittest.TestCase):
         self.tempdir = tempfile.TemporaryDirectory()
         root = Path(self.tempdir.name)
         self.original = {name: getattr(recipe_app, name) for name in ("DATA_DIR", "UPLOAD_DIR", "DB_FILE", "STATIC_DIR")}
+        from recipe_box import config as recipe_config
+
+        self.recipe_config = recipe_config
+        self.original_config_image_dir = recipe_config.RECIPE_IMAGE_DIR
+        root = Path(self.tempdir.name)
         recipe_app.DATA_DIR = root
         recipe_app.UPLOAD_DIR = root / "uploads"
         recipe_app.RECIPE_IMAGE_DIR = root / "recipe-images"
         recipe_app.DB_FILE = root / "recipe_box.db"
+        recipe_config.RECIPE_IMAGE_DIR = recipe_app.RECIPE_IMAGE_DIR
         recipe_app.UPLOAD_DIR.mkdir()
         recipe_app.RECIPE_IMAGE_DIR.mkdir()
         self.previous = {name: os.environ.get(name) for name in ("SYNC_TOKEN", "SECRET_KEY", "EPN_ENV")}
@@ -40,6 +46,7 @@ class ApiFoundationTests(unittest.TestCase):
                 os.environ[name] = value
         for name, value in self.original.items():
             setattr(self.recipe_app, name, value)
+        self.recipe_config.RECIPE_IMAGE_DIR = self.original_config_image_dir
         self.tempdir.cleanup()
 
     def login(self):
@@ -216,8 +223,14 @@ class ApiFoundationTests(unittest.TestCase):
         created = self.create_recipe(token, title="Original")
         recipe_id = created["id"]
         with self.recipe_app.db_connect() as conn:
-            conn.execute("INSERT INTO favorites(user_id, recipe_id, created_at) VALUES(?, ?, ?)", (self.user_id, recipe_id, "2026-01-01T00:00:00+00:00"))
-            conn.execute("INSERT INTO recipe_user_state(user_id, recipe_id, is_favorite, is_archived, archived_at, created_at, updated_at) VALUES(?, ?, 0, 1, ?, ?, ?)", (self.user_id, recipe_id, "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00"))
+            conn.execute(
+                "INSERT INTO favorites(user_id, recipe_id, created_at) VALUES(?, ?, ?)",
+                (self.user_id, recipe_id, "2026-01-01T00:00:00+00:00"),
+            )
+            conn.execute(
+                "INSERT INTO recipe_user_state(user_id, recipe_id, is_favorite, is_archived, archived_at, created_at, updated_at) VALUES(?, ?, 0, 1, ?, ?, ?)",
+                (self.user_id, recipe_id, "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00"),
+            )
         response = self.client.patch(
             f"/api/v1/recipes/{recipe_id}",
             headers={"Authorization": f"Bearer {token}"},
@@ -244,7 +257,9 @@ class ApiFoundationTests(unittest.TestCase):
         self.assertEqual(updated["creator"]["id"], self.user_id)
         with self.recipe_app.db_connect() as conn:
             row = conn.execute("SELECT owner_id FROM recipes WHERE id=?", (recipe_id,)).fetchone()
-            state = conn.execute("SELECT is_archived FROM recipe_user_state WHERE user_id=? AND recipe_id=?", (self.user_id, recipe_id)).fetchone()
+            state = conn.execute(
+                "SELECT is_archived FROM recipe_user_state WHERE user_id=? AND recipe_id=?", (self.user_id, recipe_id)
+            ).fetchone()
             favorite = conn.execute("SELECT 1 FROM favorites WHERE user_id=? AND recipe_id=?", (self.user_id, recipe_id)).fetchone()
         self.assertEqual(row["owner_id"], self.user_id)
         self.assertEqual(state["is_archived"], 1)
@@ -255,12 +270,20 @@ class ApiFoundationTests(unittest.TestCase):
         created = self.create_recipe(owner_token)
         other_id = self.recipe_app.create_account("other-edit@example.com", "correct-horse")
         self.recipe_app.update_profile(other_id, "Other", "", "")
-        other_token = self.client.post("/api/v1/auth/login", json={"email": "other-edit@example.com", "password": "correct-horse"}).get_json()["token"]
+        other_token = self.client.post(
+            "/api/v1/auth/login", json={"email": "other-edit@example.com", "password": "correct-horse"}
+        ).get_json()["token"]
         for token, status in ((None, 401), (other_token, 403)):
             headers = {} if token is None else {"Authorization": f"Bearer {token}"}
             response = self.client.patch(f"/api/v1/recipes/{created['id']}", headers=headers, json={"title": "Nope"})
             self.assertEqual(response.status_code, status)
-        for body in ({"ingredients": "not-an-array"}, {"tags": ["x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13"]}, {"category": "bad category!"}, {"visibility": "public"}, {"owner_id": "attacker"}):
+        for body in (
+            {"ingredients": "not-an-array"},
+            {"tags": ["x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13"]},
+            {"category": "bad category!"},
+            {"visibility": "public"},
+            {"owner_id": "attacker"},
+        ):
             response = self.client.patch(f"/api/v1/recipes/{created['id']}", headers={"Authorization": f"Bearer {owner_token}"}, json=body)
             self.assertEqual(response.status_code, 422)
             self.assertEqual(response.get_json()["error"]["code"], "VALIDATION_ERROR")
@@ -342,6 +365,95 @@ class ApiFoundationTests(unittest.TestCase):
         self.assertEqual(feed.status_code, 200)
         self.assertGreaterEqual(len(feed.get_json()["data"]), 3)
         self.assertNotIn("comment_added", {item["event_type"] for item in feed.get_json()["data"]})
+
+    def test_profile_patch_is_authenticated_and_limited_to_editable_fields(self):
+        token = self.login()
+        response = self.client.patch(
+            "/api/v1/me", headers={"Authorization": f"Bearer {token}"}, json={"nickname": "  New   Name ", "bio": "About me"}
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["nickname"], "New Name")
+        self.assertEqual(response.get_json()["bio"], "About me")
+        self.assertEqual(self.client.patch("/api/v1/me", json={"nickname": "Nope"}).status_code, 401)
+        rejected = self.client.patch("/api/v1/me", headers={"Authorization": f"Bearer {token}"}, json={"email": "attacker@example.com"})
+        self.assertEqual(rejected.status_code, 422)
+
+    def test_recipe_image_upload_replacement_validation_authorization_and_private_delivery(self):
+        from io import BytesIO
+        from PIL import Image
+
+        token = self.login()
+        created = self.create_recipe(token, title="Image Card")
+        recipe_id = created["id"]
+
+        def jpeg(color):
+            stream = BytesIO()
+            Image.new("RGB", (32, 24), color).save(stream, format="JPEG")
+            stream.seek(0)
+            return stream
+
+        uploaded = self.client.put(
+            f"/api/v1/recipes/{recipe_id}/image",
+            headers={"Authorization": f"Bearer {token}"},
+            data={"image": (jpeg("red"), "first.jpg")},
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(uploaded.status_code, 200)
+        first = uploaded.get_json()["image"]
+        self.assertEqual(first["media_type"], "image/jpeg")
+        with self.recipe_app.db_connect() as conn:
+            first_filename = conn.execute("SELECT image_filename FROM recipes WHERE id=?", (recipe_id,)).fetchone()["image_filename"]
+        old_path = self.recipe_app.RECIPE_IMAGE_DIR / first_filename
+        self.assertTrue(old_path.is_file())
+
+        replaced = self.client.put(
+            f"/api/v1/recipes/{recipe_id}/image",
+            headers={"Authorization": f"Bearer {token}"},
+            data={"image": (jpeg("blue"), "second.jpg")},
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(replaced.status_code, 200)
+        second = replaced.get_json()["image"]
+        with self.recipe_app.db_connect() as conn:
+            second_filename = conn.execute("SELECT image_filename FROM recipes WHERE id=?", (recipe_id,)).fetchone()["image_filename"]
+        self.assertNotEqual(first_filename, second_filename)
+        self.assertFalse(old_path.exists())
+        new_path = self.recipe_app.RECIPE_IMAGE_DIR / second_filename
+        self.assertTrue(new_path.is_file())
+
+        failed = self.client.put(
+            f"/api/v1/recipes/{recipe_id}/image",
+            headers={"Authorization": f"Bearer {token}"},
+            data={"image": (BytesIO(b"not an image"), "bad.jpg")},
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(failed.status_code, 422)
+        with self.recipe_app.db_connect() as conn:
+            self.assertEqual(
+                conn.execute("SELECT image_filename FROM recipes WHERE id=?", (recipe_id,)).fetchone()["image_filename"], second_filename
+            )
+
+        other_id = self.recipe_app.create_account("image-other@example.com", "correct-horse")
+        self.recipe_app.update_profile(other_id, "Other", "", "")
+        other_token = self.client.post(
+            "/api/v1/auth/login", json={"email": "image-other@example.com", "password": "correct-horse"}
+        ).get_json()["token"]
+        self.assertEqual(
+            self.client.put(
+                f"/api/v1/recipes/{recipe_id}/image",
+                headers={"Authorization": f"Bearer {other_token}"},
+                data={"image": (jpeg("green"), "other.jpg")},
+                content_type="multipart/form-data",
+            ).status_code,
+            403,
+        )
+        self.client.patch(f"/api/v1/recipes/{recipe_id}", headers={"Authorization": f"Bearer {token}"}, json={"visibility": "private"})
+        self.assertEqual(
+            self.client.get(f"/api/v1/recipes/{recipe_id}/image", headers={"Authorization": f"Bearer {other_token}"}).status_code, 404
+        )
+        self.assertEqual(
+            self.client.get(f"/api/v1/recipes/{recipe_id}/image", headers={"Authorization": f"Bearer {token}"}).status_code, 200
+        )
 
 
 if __name__ == "__main__":
