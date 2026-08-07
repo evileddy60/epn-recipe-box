@@ -307,7 +307,7 @@
       transform: translateX(-50%);
       width: min(calc(100% - 22px), 620px);
       display: grid;
-      grid-template-columns: repeat(6, 1fr);
+      grid-template-columns: repeat(6, minmax(0, 1fr));
       gap: 6px;
       padding: 7px;
       border-radius: 18px;
@@ -321,6 +321,7 @@
       text-decoration: none;
       text-align: center;
       padding: 8px 5px;
+      min-width: 0;
       border-radius: 13px;
       font-size: .8rem;
       font-weight: 760;
