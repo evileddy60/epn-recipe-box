@@ -109,7 +109,13 @@ def verify_release_directory(release: Path) -> dict:
     for item in manifest.get("files", []):
         if not isinstance(item, dict) or not isinstance(item.get("path"), str): fail("invalid manifest entry")
         relative = safe_relative(item["path"])
-        if any(part.lower() in FORBIDDEN or any(token in part.lower() for token in FORBIDDEN[:6]) for part in relative.parts): fail(f"forbidden file: {relative}")
+        lowered_parts = {part.lower() for part in relative.parts}
+        forbidden_exact = {".env", "secret", "token", "credential", "password", "signing-key", "recipe_box.db", "uploads", "recipe-images", "backups"}
+        if lowered_parts.intersection(forbidden_exact):
+            fail(f"forbidden file: {relative}")
+        secret_markers = ("secret", "token", "credential", "password", "signing-key")
+        if any(marker in part.lower() for part in relative.parts for marker in secret_markers):
+            fail(f"forbidden file: {relative}")
         path = release / relative
         if path.is_symlink() or not path.is_file(): fail(f"release file missing or symlinked: {relative}")
         if path.stat().st_size != item.get("size") or digest(path) != item.get("sha256"): fail(f"release checksum mismatch: {relative}")
