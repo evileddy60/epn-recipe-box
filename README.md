@@ -148,7 +148,12 @@ sudo systemctl restart epn-recipe-box
 
 The recommended private deployment binds Gunicorn to `127.0.0.1:5000` and uses Tailscale Serve for HTTPS. Install and connect Tailscale on the Pi and each invited device, then use the Pi's MagicDNS hostname. Do not open router/UFW ports or expose the Flask port publicly. See `docs/v2.1/deployment-plan.md` for the operator-managed steps.
 
-## Versioned Android API
+## Android beta download
+
+Invited testers use the tailnet-only page `https://epn-hermes-worker-01.tail510dca.ts.net/beta`. The page and its explicit allowlisted routes expose only `latest.apk`, `latest.sha256`, `INSTALL.md`, `CHANGELOG.md`, and `release.json` from the production beta artifact directory. Historical releases and arbitrary filesystem paths are not routed.
+
+In production, the service reads beta artifacts from `/var/lib/epn-recipe-box/public-beta`; the Android publisher's authoritative staging directory is the sibling `Public-Beta/` directory under `/srv/samba/HERMES-01/Projects/EPN-Recipe-Box`. Artifact promotion is performed as a staged directory replacement after checksum and JSON validation. Gunicorn remains loopback-only and Tailscale Serve remains tailnet-only; Funnel is not enabled.
+
 
 The additive `/api/v1/` API is for native clients and is separate from browser sessions and peer synchronization. It provides:
 
