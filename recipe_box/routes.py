@@ -5,7 +5,7 @@ import os
 import sqlite3
 import uuid
 
-from flask import Blueprint, flash, jsonify, redirect, render_template, request, send_from_directory, session, url_for
+from flask import Blueprint, abort, flash, jsonify, redirect, render_template, request, send_file, send_from_directory, session, url_for
 
 from . import config as _config
 from .config import *
@@ -17,6 +17,46 @@ from .security import login_allowed, login_retry_after, record_login_failure, re
 from .policies import can_delete_comment, can_edit_comment, can_hide_comment, can_unhide_comment
 
 bp = Blueprint("main", __name__)
+
+
+_BETA_FILES = frozenset({"latest.apk", "latest.sha256", "INSTALL.md", "CHANGELOG.md", "release.json"})
+
+
+def _beta_metadata() -> dict:
+    metadata_path = _config.PUBLIC_BETA_DIR / "release.json"
+    if metadata_path.is_symlink() or not metadata_path.is_file():
+        abort(404)
+    payload: dict = {}
+    try:
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        abort(404)
+    if payload.get("apk") != "latest.apk" or payload.get("release_notes") != "CHANGELOG.md":
+        abort(404)
+    return payload
+
+
+@bp.get("/beta")
+def beta_download_page():
+    metadata = _beta_metadata()
+    changelog = (_config.PUBLIC_BETA_DIR / "CHANGELOG.md").read_text(encoding="utf-8")
+    highlights = [line[2:].strip() for line in changelog.splitlines() if line.startswith("- ")][:5]
+    return render_template("beta.html", title="Download Android Beta · EPN Recipe Box", user=None, metadata=metadata, highlights=highlights, active="beta")
+
+
+@bp.get("/beta/<path:filename>")
+def beta_artifact(filename: str):
+    if filename not in _BETA_FILES or "/" in filename or "\\" in filename or filename.startswith("."):
+        abort(404)
+    root = _config.PUBLIC_BETA_DIR.resolve()
+    path = (_config.PUBLIC_BETA_DIR / filename)
+    if path.is_symlink() or not path.is_file() or path.resolve().parent != root:
+        abort(404)
+    metadata = _beta_metadata()
+    if filename == "latest.apk":
+        return send_file(path, mimetype="application/vnd.android.package-archive", as_attachment=True, download_name=f"EPN-Recipe-Box-Private-Beta-{metadata['version_name']}.apk", max_age=0)
+    mimetypes = {"release.json": "application/json", "latest.sha256": "text/plain", "INSTALL.md": "text/markdown", "CHANGELOG.md": "text/markdown"}
+    return send_file(path, mimetype=mimetypes[filename], as_attachment=False, max_age=0)
 
 
 @bp.route("/health")

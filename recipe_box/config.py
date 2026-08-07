@@ -5,6 +5,9 @@ from pathlib import Path
 APP_TITLE = "EPN Recipe Box"
 BASE_DIR = Path(__file__).resolve().parent.parent
 STATIC_DIR = BASE_DIR / "static"
+# Beta artifacts are an explicit allowlisted directory, never a user-controlled path.
+_configured_beta_dir = os.environ.get("EPN_PUBLIC_BETA_DIR", "").strip()
+PUBLIC_BETA_DIR = Path(_configured_beta_dir) if _configured_beta_dir else (Path("/var/lib/epn-recipe-box/public-beta") if os.environ.get("EPN_ENV", "development").strip().lower() in {"production", "prod"} else BASE_DIR.parent / "Public-Beta")
 DATA_DIR = Path(os.environ.get("EPN_DATA_DIR", BASE_DIR / "data"))
 UPLOAD_DIR = DATA_DIR / "uploads"
 RECIPE_IMAGE_DIR = DATA_DIR / "recipe-images"

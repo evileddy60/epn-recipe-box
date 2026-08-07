@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="panel" aria-labelledby="beta-heading">
+  <p class="box-label">Private beta</p>
+  <h2 id="beta-heading">Download Android Beta</h2>
+  <p>EPN Recipe Box is a private beta for invited testers. Connect to the EPN Tailnet with Tailscale before downloading or opening the app.</p>
+  <div class="stats-grid" aria-label="Beta release details">
+    <div class="stat-card"><strong>{{ metadata.version_name }}</strong><span>Current beta</span></div>
+    <div class="stat-card"><strong>Android {{ metadata.minimum_android_version }}</strong><span>Minimum version</span></div>
+    <div class="stat-card"><strong>{{ metadata.release_date[:10] }}</strong><span>Release date</span></div>
+  </div>
+  <div class="actions">
+    <a class="button" href="{{ url_for('beta_artifact', filename='latest.apk') }}">Download Android Beta</a>
+    <a class="button secondary" href="{{ url_for('beta_artifact', filename='INSTALL.md') }}">Installation guide</a>
+  </div>
+  <p class="small">SHA-256: <code>{{ metadata.sha256 }}</code></p>
+</section>
+
+<section class="panel" aria-labelledby="beta-instructions-heading">
+  <h3 id="beta-instructions-heading">Before you install</h3>
+  <ol>
+    <li>Install Tailscale from Google Play and accept the EPN Tailnet invitation.</li>
+    <li>Open Tailscale and confirm it is connected.</li>
+    <li>Download and install the APK. Android may ask you to allow installs from your browser.</li>
+    <li>Open EPN Recipe Box and choose Sign In or Create Account.</li>
+  </ol>
+  <p class="small">This page and the Recipe Box server are tailnet-only. Please do not redistribute the APK publicly. Updates will use this same download page.</p>
+</section>
+
+<section class="panel" aria-labelledby="beta-highlights-heading">
+  <h3 id="beta-highlights-heading">Latest changelog highlights</h3>
+  {% if highlights %}<ul>{% for item in highlights %}<li>{{ item }}</li>{% endfor %}</ul>{% else %}<p>No highlights are available yet.</p>{% endif %}
+  <p><a href="{{ url_for('beta_artifact', filename='CHANGELOG.md') }}">View full changelog</a> · <a href="{{ url_for('beta_artifact', filename='release.json') }}">Release metadata</a></p>
+</section>
+{% endblock %}
