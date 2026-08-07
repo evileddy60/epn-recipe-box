@@ -16,7 +16,7 @@ def _configure_runtime_data_dir(script_path: Path) -> None:
         os.environ["EPN_DATA_DIR"] = str(production_data)
 
 
-_configure_runtime_data_dir(Path(__file__))
+_configure_runtime_data_dir(Path(sys.argv[0]))
 import app as recipe_app  # noqa: E402
 
 
