@@ -128,6 +128,53 @@ def _validate_login(payload: dict | None) -> tuple[str, str] | None:
     return email, password
 
 
+def _validate_signup(payload: dict | None) -> tuple[str, str, str] | None:
+    if not payload or not all(isinstance(payload.get(field), str) for field in ("email", "password", "nickname")):
+        return None
+    return payload["email"].strip().lower(), payload["password"], payload["nickname"]
+
+
+def _issue_api_token(user_id: str) -> tuple[str, str]:
+    token = secrets.token_urlsafe(32)
+    expires_at = (_now() + timedelta(days=API_TOKEN_TTL_DAYS)).isoformat(timespec="seconds")
+    with db_connect() as conn:
+        conn.execute(
+            "INSERT INTO api_tokens (id, user_id, token_hash, expires_at, created_at) VALUES (?, ?, ?, ?, ?)",
+            (f"api-{uuid.uuid4().hex}", user_id, token_hash(token), expires_at, _now_iso()),
+        )
+    return token, expires_at
+
+
+@bp.route("/auth/signup", methods=["POST"])
+def signup():
+    payload = _json_body()
+    candidate_email = payload.get("email", "") if isinstance(payload, dict) and isinstance(payload.get("email"), str) else ""
+    candidate_email = candidate_email.strip().lower()
+    if candidate_email and not login_allowed(candidate_email):
+        response = _error("RATE_LIMITED", "Too many signup attempts. Try again shortly.", 429)
+        response[0].headers["Retry-After"] = str(login_retry_after(candidate_email))
+        return response
+    credentials = _validate_signup(payload)
+    if not credentials:
+        if candidate_email:
+            record_login_failure(candidate_email)
+        return _error("VALIDATION_ERROR", "Email, password, and nickname are required.", 422)
+    email, password, nickname = credentials
+    try:
+        init_db()
+        user_id = create_account(email, password, nickname)
+    except ValueError as exc:
+        record_login_failure(email)
+        return _error("VALIDATION_ERROR", str(exc), 422)
+    except sqlite3.IntegrityError:
+        return _error("ACCOUNT_EXISTS", "An account with that email already exists.", 409)
+    token, expires_at = _issue_api_token(user_id)
+    with db_connect() as conn:
+        row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    record_login_success(email)
+    return jsonify({"token": token, "token_type": "Bearer", "expires_at": expires_at, "user": _user_payload(row)}), 201
+
+
 @bp.route("/health")
 def health():
     init_db()

@@ -35,6 +35,23 @@ paths:
         '401': { $ref: '#/components/responses/AuthFailed' }
         '422': { $ref: '#/components/responses/ValidationError' }
         '429': { $ref: '#/components/responses/RateLimited' }
+  /auth/signup:
+    post:
+      summary: Create an account, profile nickname, and API session
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SignupRequest' }
+      responses:
+        '201':
+          description: Account created and API token issued
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LoginResponse' }
+        '409': { description: Account already exists, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '429': { $ref: '#/components/responses/RateLimited' }
   /auth/logout:
     post:
       summary: Revoke the current API token
@@ -309,6 +326,13 @@ components:
       properties:
         email: { type: string, format: email, maxLength: 254 }
         password: { type: string, format: password, maxLength: 128 }
+    SignupRequest:
+      type: object
+      required: [email, password, nickname]
+      properties:
+        email: { type: string, format: email, maxLength: 254 }
+        password: { type: string, format: password, minLength: 8, maxLength: 128 }
+        nickname: { type: string, minLength: 1, maxLength: 80 }
     LoginResponse:
       type: object
       required: [token, token_type, expires_at, user]

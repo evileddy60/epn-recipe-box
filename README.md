@@ -152,7 +152,7 @@ The recommended private deployment binds Gunicorn to `127.0.0.1:5000` and uses T
 
 The additive `/api/v1/` API is for native clients and is separate from browser sessions and peer synchronization. It provides:
 
-- `POST /api/v1/auth/login` and `POST /api/v1/auth/logout`
+- `POST /api/v1/auth/signup`, `/api/v1/auth/login`, and `/api/v1/auth/logout`
 - `GET /api/v1/me`
 - Paginated/searchable/filterable `GET /api/v1/recipes`
 - `GET /api/v1/recipes/<id>` and authenticated image delivery
