@@ -211,6 +211,60 @@ class ApiFoundationTests(unittest.TestCase):
         self.assertEqual(invalid.status_code, 422)
         self.assertEqual(invalid.get_json()["error"]["code"], "VALIDATION_ERROR")
 
+    def test_recipe_owner_can_update_all_editable_fields_without_changing_owner_or_local_state(self):
+        token = self.login()
+        created = self.create_recipe(token, title="Original")
+        recipe_id = created["id"]
+        with self.recipe_app.db_connect() as conn:
+            conn.execute("INSERT INTO favorites(user_id, recipe_id, created_at) VALUES(?, ?, ?)", (self.user_id, recipe_id, "2026-01-01T00:00:00+00:00"))
+            conn.execute("INSERT INTO recipe_user_state(user_id, recipe_id, is_favorite, is_archived, archived_at, created_at, updated_at) VALUES(?, ?, 0, 1, ?, ?, ?)", (self.user_id, recipe_id, "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00"))
+        response = self.client.patch(
+            f"/api/v1/recipes/{recipe_id}",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "title": "Updated title",
+                "summary": "Updated summary",
+                "prep_time": "25 minutes",
+                "servings": "4",
+                "ingredients": ["beans", "rice"],
+                "steps": ["Soak beans.", "Cook dinner."],
+                "category": "lunch",
+                "tags": ["updated", "family"],
+                "visibility": "private",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        updated = response.get_json()
+        self.assertEqual(updated["title"], "Updated title")
+        self.assertEqual(updated["ingredients"], ["beans", "rice"])
+        self.assertEqual(updated["steps"], ["Soak beans.", "Cook dinner."])
+        self.assertEqual(updated["category"], "lunch")
+        self.assertEqual([tag["normalized_name"] for tag in updated["tags"]], ["family", "updated"])
+        self.assertEqual(updated["visibility"], "private")
+        self.assertEqual(updated["creator"]["id"], self.user_id)
+        with self.recipe_app.db_connect() as conn:
+            row = conn.execute("SELECT owner_id FROM recipes WHERE id=?", (recipe_id,)).fetchone()
+            state = conn.execute("SELECT is_archived FROM recipe_user_state WHERE user_id=? AND recipe_id=?", (self.user_id, recipe_id)).fetchone()
+            favorite = conn.execute("SELECT 1 FROM favorites WHERE user_id=? AND recipe_id=?", (self.user_id, recipe_id)).fetchone()
+        self.assertEqual(row["owner_id"], self.user_id)
+        self.assertEqual(state["is_archived"], 1)
+        self.assertIsNotNone(favorite)
+
+    def test_recipe_update_requires_owner_and_rejects_malformed_fields(self):
+        owner_token = self.login()
+        created = self.create_recipe(owner_token)
+        other_id = self.recipe_app.create_account("other-edit@example.com", "correct-horse")
+        self.recipe_app.update_profile(other_id, "Other", "", "")
+        other_token = self.client.post("/api/v1/auth/login", json={"email": "other-edit@example.com", "password": "correct-horse"}).get_json()["token"]
+        for token, status in ((None, 401), (other_token, 403)):
+            headers = {} if token is None else {"Authorization": f"Bearer {token}"}
+            response = self.client.patch(f"/api/v1/recipes/{created['id']}", headers=headers, json={"title": "Nope"})
+            self.assertEqual(response.status_code, status)
+        for body in ({"ingredients": "not-an-array"}, {"tags": ["x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13"]}, {"category": "bad category!"}, {"visibility": "public"}, {"owner_id": "attacker"}):
+            response = self.client.patch(f"/api/v1/recipes/{created['id']}", headers={"Authorization": f"Bearer {owner_token}"}, json=body)
+            self.assertEqual(response.status_code, 422)
+            self.assertEqual(response.get_json()["error"]["code"], "VALIDATION_ERROR")
+
     def test_recipe_visibility_is_shared_by_default_and_private_is_owner_only(self):
         token = self.login()
         created = self.create_recipe(token, title="Community Card")

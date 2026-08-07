@@ -117,6 +117,24 @@ paths:
               schema: { $ref: '#/components/schemas/Recipe' }
         '401': { $ref: '#/components/responses/AuthRequired' }
         '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      summary: Partially update an owned recipe's supported fields
+      description: Owner-only text and taxonomy update. Image replacement is not supported by the mobile API. Owner identity, favorites, archive state, synchronization fields, and filesystem metadata are never writable.
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/RecipeId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateRecipeRequest' }
+      responses:
+        '200':
+          description: Updated recipe
+          content: { application/json: { schema: { $ref: '#/components/schemas/Recipe' } } }
+        '401': { $ref: '#/components/responses/AuthRequired' }
+        '403': { description: Caller is not the recipe owner, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationError' }
   /recipes/{recipe_id}/image:
     get:
       summary: Get a recipe image through the authenticated API
@@ -361,6 +379,21 @@ components:
         steps: { type: array, maxItems: 500, items: { type: string, minLength: 1, maxLength: 2000 } }
         category: { type: string, maxLength: 40 }
         tags: { type: array, maxItems: 12, items: { type: string, minLength: 1, maxLength: 40 } }
+        visibility: { type: string, enum: [private, shared_epn], default: shared_epn }
+    UpdateRecipeRequest:
+      type: object
+      minProperties: 1
+      additionalProperties: false
+      properties:
+        title: { type: string, maxLength: 200 }
+        summary: { type: string, maxLength: 1000 }
+        prep_time: { type: string, maxLength: 200 }
+        servings: { type: string, maxLength: 200 }
+        ingredients: { type: array, maxItems: 500, items: { type: string, minLength: 1, maxLength: 2000 } }
+        steps: { type: array, maxItems: 500, items: { type: string, minLength: 1, maxLength: 2000 } }
+        category: { type: string, maxLength: 40 }
+        tags: { type: array, maxItems: 12, items: { type: string, minLength: 1, maxLength: 40 } }
+        visibility: { type: string, enum: [private, shared_epn] }
     CollectionRequest:
       type: object
       required: [name]
@@ -393,6 +426,7 @@ components:
         creator: { type: object, properties: { id: { type: string }, nickname: { type: string } } }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
+        visibility: { type: string, enum: [private, shared_epn] }
     Tag:
       type: object
       properties:

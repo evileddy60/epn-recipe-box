@@ -425,20 +425,48 @@ def api_archive(recipe_id):
 @bp.route("/recipes/<recipe_id>", methods=["PATCH"])
 @_require_token
 def api_update_recipe(recipe_id):
-    payload = _json_body() or {}
-    try:
-        visibility = normalize_visibility(payload.get("visibility"))
-    except ValueError as exc:
-        return _error("VALIDATION_ERROR", str(exc), 422)
+    payload = _json_body()
+    if payload is None or not payload:
+        return _error("VALIDATION_ERROR", "A JSON recipe update object is required.", 422)
+    editable_fields = {"title", "summary", "prep_time", "servings", "ingredients", "steps", "category", "tags", "visibility"}
+    unknown_fields = sorted(set(payload) - editable_fields)
+    if unknown_fields:
+        return _error("VALIDATION_ERROR", "Unsupported recipe fields.", 422, {"fields": unknown_fields})
     with db_connect() as conn:
         row = conn.execute("SELECT * FROM recipes WHERE id=?", (recipe_id,)).fetchone()
         if not row:
             return _error("NOT_FOUND", "Recipe not found.", 404)
         if row["owner_id"] != g.api_user["id"]:
             return _error("FORBIDDEN", "Only the recipe owner can update it.", 403)
-        conn.execute("UPDATE recipes SET visibility=?, updated_at=? WHERE id=?", (visibility, _now_iso(), recipe_id))
+        current_tags = recipe_tag_payload(conn, recipe_id)
+        current = {
+            "title": row["title"],
+            "summary": row["summary"],
+            "prep_time": row["prep_time"],
+            "servings": row["servings"],
+            "ingredients": "\n".join(json.loads(row["ingredients_json"])),
+            "steps": "\n".join(json.loads(row["steps_json"])),
+            "category": row["category_key"] or "",
+            "tags": ", ".join(tag["display_name"] for tag in current_tags),
+            "visibility": row["visibility"] if "visibility" in row.keys() else "shared_epn",
+        }
+        for field in editable_fields.intersection(payload):
+            value = payload[field]
+            if field in {"ingredients", "steps", "tags"}:
+                if not isinstance(value, list) or any(not isinstance(item, str) or not item.strip() for item in value):
+                    return _error("VALIDATION_ERROR", f"{field} must be an array of non-empty strings.", 422)
+                current[field] = "\n".join(value) if field != "tags" else ", ".join(value)
+            elif not isinstance(value, str):
+                return _error("VALIDATION_ERROR", f"{field} must be a string.", 422)
+            else:
+                current[field] = value
+        try:
+            update_recipe(recipe_id, current)
+        except (KeyError, TypeError, ValueError) as exc:
+            return _error("VALIDATION_ERROR", str(exc), 422)
         row = conn.execute(
-            "SELECT r.*, owner.nickname AS owner_nickname FROM recipes r JOIN users owner ON owner.id=r.owner_id WHERE r.id=?", (recipe_id,)
+            "SELECT r.*, owner.nickname AS owner_nickname, EXISTS (SELECT 1 FROM favorites f WHERE f.recipe_id=r.id AND f.user_id=?) AS favorite, COALESCE(state.is_archived,0) AS archived FROM recipes r JOIN users owner ON owner.id=r.owner_id LEFT JOIN recipe_user_state state ON state.recipe_id=r.id AND state.user_id=? WHERE r.id=?",
+            (g.api_user["id"], g.api_user["id"], recipe_id),
         ).fetchone()
         return jsonify(_recipe_payload(row, conn))
 
