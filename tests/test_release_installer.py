@@ -77,6 +77,49 @@ class ReleaseInstallerTests(unittest.TestCase):
             result = self.run_installer("stage-release", str(outside), str(checksum), root=root, incoming=incoming)
             self.assertNotEqual(result.returncode, 0)
 
+    def test_restore_repairs_service_account_ownership_and_modes(self):
+        with tempfile.TemporaryDirectory() as name:
+            root, incoming = Path(name), Path(name) / "incoming"
+            data = root / "data"
+            (data / "uploads").mkdir(parents=True)
+            (data / "recipe-images").mkdir()
+            (data / "recipe_box.db").write_bytes(b"old")
+            backup = root / "backups" / "backup"
+            (backup / "uploads").mkdir(parents=True)
+            (backup / "recipe-images").mkdir()
+            import sqlite3
+
+            with sqlite3.connect(backup / "recipe_box.db") as conn:
+                conn.execute("CREATE TABLE schema_version(version INTEGER)")
+                conn.execute("INSERT INTO schema_version VALUES (14)")
+            (backup / "manifest.json").write_text("[]", encoding="utf-8")
+            env = os.environ.copy()
+            env.update(
+                {
+                    "EPN_RECIPE_BOX_SERVICE_USER": str(os.getuid()),
+                    "EPN_RECIPE_BOX_SERVICE_GROUP": str(os.getgid()),
+                    "EPN_RECIPE_BOX_ROOT": str(root / "opt"),
+                    "EPN_RECIPE_BOX_DATA_DIR": str(data),
+                    "EPN_RECIPE_BOX_BACKUP_ROOT": str(root / "backups"),
+                    "EPN_RECIPE_BOX_INCOMING": str(incoming),
+                }
+            )
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            (fake_bin / "systemctl").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            (fake_bin / "systemctl").chmod(0o755)
+            env["PATH"] = f"{fake_bin}:{env['PATH']}"
+            result = subprocess.run([str(self.installer), "restore", str(backup)], env=env, text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual((data / "recipe_box.db").stat().st_mode & 0o777, 0o660)
+            self.assertEqual((data / "uploads").stat().st_mode & 0o777, 0o750)
+
+    def test_installer_source_has_canonical_service_and_legacy_conflict_guard(self):
+        source = self.installer.read_text(encoding="utf-8")
+        self.assertIn('os.environ.get("EPN_RECIPE_BOX_SERVICE", "epn-recipe-box-release.service")', source)
+        self.assertIn("epn-recipe-box.service", source)
+        self.assertIn('run("systemctl", "disable", "--now", LEGACY_SERVICE', source)
+
 
 if __name__ == "__main__":
     unittest.main()

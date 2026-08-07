@@ -18,7 +18,8 @@ PREFIX = Path(os.environ.get("EPN_RECIPE_BOX_ROOT", "/opt/epn-recipe-box"))
 DATA = Path(os.environ.get("EPN_RECIPE_BOX_DATA_DIR", "/var/lib/epn-recipe-box"))
 BACKUPS = Path(os.environ.get("EPN_RECIPE_BOX_BACKUP_ROOT", "/var/backups/epn-recipe-box"))
 INCOMING = Path(os.environ.get("EPN_RECIPE_BOX_INCOMING", "/var/tmp/epn-recipe-box-incoming"))
-SERVICE = os.environ.get("EPN_RECIPE_BOX_SERVICE", "epn-recipe-box.service")
+SERVICE = os.environ.get("EPN_RECIPE_BOX_SERVICE", "epn-recipe-box-release.service")
+LEGACY_SERVICE = "epn-recipe-box.service"
 HEALTH_URL = os.environ.get("EPN_RECIPE_BOX_HEALTH_URL", "http://127.0.0.1:5055/api/v1/health")
 TAILSCALE_HEALTH_URL = os.environ.get("EPN_RECIPE_BOX_TAILSCALE_HEALTH_URL", "")
 EXPECTED_SCHEMA = int(os.environ.get("EPN_RECIPE_BOX_SCHEMA", "14"))
@@ -56,6 +57,40 @@ def digest(path: Path) -> str:
 
 def run(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
     return subprocess.run(args, text=True, capture_output=True, check=check)
+
+
+def service_identity() -> tuple[str, str]:
+    user = os.environ.get("EPN_RECIPE_BOX_SERVICE_USER", "")
+    group = os.environ.get("EPN_RECIPE_BOX_SERVICE_GROUP", "")
+    if not user:
+        user = run("systemctl", "show", "-p", "User", "--value", SERVICE).stdout.strip()
+    if not group:
+        group = run("systemctl", "show", "-p", "Group", "--value", SERVICE).stdout.strip()
+    if not user or not group:
+        fail("service account could not be derived from systemd")
+    return user, group
+
+
+def repair_ownership() -> None:
+    user, group = service_identity()
+    if not DATA.is_dir() or DATA.is_symlink():
+        fail("unsafe Recipe Box data directory")
+    for path in (DATA / "recipe_box.db", DATA / "uploads", DATA / "recipe-images"):
+        if path.exists() and path.is_symlink():
+            fail(f"unsafe data path: {path.name}")
+    run("chown", "-R", f"{user}:{group}", str(DATA))
+    run("chmod", "750", str(DATA))
+    for directory in (DATA / "uploads", DATA / "recipe-images"):
+        if directory.exists():
+            run("find", str(directory), "-type", "d", "-exec", "chmod", "750", "{}", "+")
+            run("find", str(directory), "-type", "f", "-exec", "chmod", "660", "{}", "+")
+    db = DATA / "recipe_box.db"
+    if db.exists():
+        run("chmod", "660", str(db))
+
+
+def stop_legacy_service() -> None:
+    run("systemctl", "disable", "--now", LEGACY_SERVICE, check=False)
 
 
 def verify_release_directory(release: Path) -> dict:
@@ -148,9 +183,31 @@ def health() -> None:
                 if response.status >= 400: fail(f"health check failed: {url}")
 
 
+def restore(backup_path: str) -> None:
+    backup = verify_backup(Path(backup_path))
+    stop_legacy_service()
+    run("systemctl", "stop", SERVICE)
+    stage = DATA / ".restore-stage"
+    if stage.exists(): shutil.rmtree(stage)
+    stage.mkdir(parents=True)
+    shutil.copy2(backup / "recipe_box.db", stage / "recipe_box.db")
+    for name in ("uploads", "recipe-images"):
+        shutil.copytree(backup / name, stage / name)
+    for name in ("recipe_box.db", "uploads", "recipe-images"):
+        target = DATA / name
+        if target.exists():
+            if target.is_dir(): shutil.rmtree(target)
+            else: target.unlink()
+        os.replace(stage / name, target)
+    shutil.rmtree(stage, ignore_errors=True)
+    repair_ownership()
+    print(f"restored {backup}")
+
+
 def activate(release_id: str, backup_path: str) -> None:
     release = PREFIX / "releases" / release_id; manifest = verify_release_directory(release)
     verify_backup(Path(backup_path))
+    stop_legacy_service()
     run("systemctl", "stop", SERVICE)
     link = PREFIX / "current"; temporary = PREFIX / f".current.{release_id}.tmp"
     if temporary.exists() or temporary.is_symlink(): temporary.unlink()
@@ -158,6 +215,7 @@ def activate(release_id: str, backup_path: str) -> None:
     os.replace(temporary, link)
     migration = os.environ.get("EPN_RECIPE_BOX_MIGRATION_COMMAND", "")
     if migration: subprocess.run(migration, shell=True, cwd=link, check=True)
+    repair_ownership()
     run("systemctl", "start", SERVICE)
     health()
     print(f"activated {release_id} schema={manifest['expected_schema_version']}")
@@ -165,6 +223,7 @@ def activate(release_id: str, backup_path: str) -> None:
 
 def rollback(previous_id: str, backup_path: str) -> None:
     previous = PREFIX / "releases" / previous_id; verify_release_directory(previous); verify_backup(Path(backup_path))
+    stop_legacy_service()
     run("systemctl", "stop", SERVICE)
     stage = DATA / ".rollback-stage"
     if stage.exists(): shutil.rmtree(stage)
@@ -177,6 +236,7 @@ def rollback(previous_id: str, backup_path: str) -> None:
         if (DATA / name).exists(): os.replace(DATA / name, old)
         os.replace(stage / name, DATA / name)
     temporary = PREFIX / f".current.rollback.tmp"; temporary.symlink_to(previous); os.replace(temporary, PREFIX / "current")
+    repair_ownership()
     run("systemctl", "start", SERVICE); health(); print(f"rolled back {previous_id}")
 
 
@@ -188,6 +248,7 @@ def main() -> int:
         print("self-check=ok")
     elif op == "backup": make_backup()
     elif op == "verify-backup" and len(sys.argv) == 3: print(verify_backup(Path(sys.argv[2])))
+    elif op == "restore" and len(sys.argv) == 3: restore(sys.argv[2])
     elif op == "stage-release" and len(sys.argv) == 4: stage(sys.argv[2], sys.argv[3])
     elif op == "verify-release" and len(sys.argv) == 3: print(json.dumps(verify_release_directory(PREFIX / "releases" / sys.argv[2]), indent=2, sort_keys=True))
     elif op == "activate-release" and len(sys.argv) == 4: activate(sys.argv[2], sys.argv[3])
@@ -197,7 +258,7 @@ def main() -> int:
     elif op == "status": run("systemctl", "status", "--no-pager", SERVICE, check=True); print("status=ok")
     elif op == "restart": run("systemctl", "restart", SERVICE); health()
     elif op == "health": health(); print("health=ok")
-    else: fail("usage: info|self-check|backup|verify-backup PATH|stage-release ARCHIVE CHECKSUM|verify-release ID|activate-release ID BACKUP|rollback ID BACKUP|list-releases|cleanup-releases|restart|health|status")
+    else: fail("usage: info|self-check|backup|verify-backup PATH|restore BACKUP|stage-release ARCHIVE CHECKSUM|verify-release ID|activate-release ID BACKUP|rollback ID BACKUP|list-releases|cleanup-releases|restart|health|status")
     return 0
 
 

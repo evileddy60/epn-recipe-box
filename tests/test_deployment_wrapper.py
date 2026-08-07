@@ -78,6 +78,8 @@ class DeploymentWrapperTests(unittest.TestCase):
                 "EPN_RECIPE_BOX_REPO": str(self.repo),
                 "EPN_RECIPE_BOX_BACKUP_ROOT": str(self.backups),
                 "EPN_RECIPE_BOX_SERVICE": "test.service",
+                "EPN_RECIPE_BOX_SERVICE_USER": str(os.getuid()),
+                "EPN_RECIPE_BOX_SERVICE_GROUP": str(os.getgid()),
                 "EPN_RECIPE_BOX_TAILSCALE_HEALTH_URL": "https://tailnet.example/health",
                 "TEST_LOG": str(self.log),
             }

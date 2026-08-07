@@ -2,6 +2,7 @@
 Description=EPN Recipe Box Flask app (release layout)
 After=network-online.target
 Wants=network-online.target
+Conflicts=epn-recipe-box.service
 
 [Service]
 Type=simple

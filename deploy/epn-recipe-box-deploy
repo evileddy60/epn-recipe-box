@@ -3,7 +3,8 @@ set -Eeuo pipefail
 
 # Controlled EPN Recipe Box deployment wrapper.
 WRAPPER_VERSION="2026.08.06.2"
-SERVICE_NAME="${EPN_RECIPE_BOX_SERVICE:-epn-recipe-box.service}"
+SERVICE_NAME="${EPN_RECIPE_BOX_SERVICE:-epn-recipe-box-release.service}"
+LEGACY_SERVICE_NAME="epn-recipe-box.service"
 REPO_DIR="${EPN_RECIPE_BOX_REPO:-/opt/epn-recipe-box}"
 DATA_DIR="${EPN_RECIPE_BOX_DATA_DIR:-/var/lib/epn-recipe-box}"
 BACKUP_ROOT="${EPN_RECIPE_BOX_BACKUP_ROOT:-/var/backups/epn-recipe-box}"
@@ -14,6 +15,35 @@ APPROVED_REF="${EPN_RECIPE_BOX_APPROVED_REF:-refs/remotes/origin/fix/comment-own
 DB_PATH="$DATA_DIR/recipe_box.db"
 UPLOADS_PATH="$DATA_DIR/uploads"
 IMAGES_PATH="$DATA_DIR/recipe-images"
+
+service_identity() {
+    local user group
+    user="${EPN_RECIPE_BOX_SERVICE_USER:-$(systemctl show -p User --value "$SERVICE_NAME")}"
+    group="${EPN_RECIPE_BOX_SERVICE_GROUP:-$(systemctl show -p Group --value "$SERVICE_NAME")}"
+    [[ -n "$user" && -n "$group" ]] || fail "service account could not be derived from systemd"
+    printf '%s %s\n' "$user" "$group"
+}
+
+repair_ownership() {
+    local user group
+    read -r user group < <(service_identity)
+    [[ -d "$DATA_DIR" && ! -L "$DATA_DIR" ]] || fail "unsafe data directory"
+    for path in "$DB_PATH" "$UPLOADS_PATH" "$IMAGES_PATH"; do
+        [[ ! -L "$path" ]] || fail "unsafe live data path: $path"
+    done
+    chown -R "$user:$group" -- "$DATA_DIR"
+    chmod 750 -- "$DATA_DIR"
+    for directory in "$UPLOADS_PATH" "$IMAGES_PATH"; do
+        [[ -d "$directory" ]] || continue
+        find -- "$directory" -type d -exec chmod 750 {} +
+        find -- "$directory" -type f -exec chmod 660 {} +
+    done
+    [[ ! -e "$DB_PATH" ]] || chmod 660 -- "$DB_PATH"
+}
+
+stop_legacy_service() {
+    systemctl disable --now "$LEGACY_SERVICE_NAME" >/dev/null 2>&1 || true
+}
 
 fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 require_cmd() { command -v "$1" >/dev/null 2>&1 || fail "required command is unavailable: $1"; }
@@ -191,6 +221,7 @@ restore() {
         fail "restore swap failed; prior data was retained where possible"
     fi
     rm -f -- "$old_db"; rm -rf -- "$old_uploads" "$old_images"
+    repair_ownership
     trap - RETURN; cleanup
     printf '%s\n' "restored $backup"
 }
@@ -263,9 +294,9 @@ rollback() {
     local commit="$1" backup="$2" rollback_schema
     [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || fail "rollback requires an exact 40-character commit SHA"
     safe_backup_dir "$backup" >/dev/null
-    systemctl stop "$SERVICE_NAME"; restore "$backup"
+    stop_legacy_service; systemctl stop "$SERVICE_NAME"; restore "$backup"
     rollback_schema="$(schema_version "$DB_PATH")"; deploy "$commit"
-    systemctl start "$SERVICE_NAME"
+    repair_ownership; systemctl start "$SERVICE_NAME"
     [[ -n "$TAILSCALE_HEALTH_URL" ]] || fail "rollback requires a Tailscale health URL"
     health_check; schema_check "$rollback_schema"
     printf '%s\n' "rollback complete: commit=$commit backup=$(absolute_existing "$backup")"

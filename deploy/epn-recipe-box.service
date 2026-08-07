@@ -1,22 +1,25 @@
 [Unit]
-Description=EPN Recipe Box Flask app
+Description=EPN Recipe Box Flask app (legacy compatibility unit)
 After=network-online.target
 Wants=network-online.target
+Conflicts=epn-recipe-box-release.service
 
 [Service]
-User=pi
-Group=pi
-WorkingDirectory=/home/pi/epn-recipe-box
-EnvironmentFile=/etc/epn-recipe-box.env
-ExecStart=/home/pi/epn-recipe-box/.venv/bin/gunicorn --workers 2 --bind 127.0.0.1:5000 app:app
+Type=simple
+User=epn-recipe-box
+Group=epn-recipe-box
+WorkingDirectory=/opt/epn-recipe-box/current
+EnvironmentFile=-/etc/epn-recipe-box/epn-recipe-box.env
+ExecStart=/opt/epn-recipe-box/shared/venv/bin/gunicorn --workers 2 --bind 127.0.0.1:5055 --access-logfile - --error-logfile - app:app
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true
 PrivateTmp=true
-ProtectSystem=full
-ReadWritePaths=/home/pi/epn-recipe-box/data
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/opt/epn-recipe-box/releases /opt/epn-recipe-box/current
+ReadWritePaths=/opt/epn-recipe-box/shared /var/lib/epn-recipe-box
 UMask=0077
 
 [Install]
 WantedBy=multi-user.target
-
