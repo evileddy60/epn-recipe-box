@@ -1,5 +1,6 @@
 import getpass
 import io
+import os
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
@@ -75,6 +76,13 @@ class PasswordResetTests(unittest.TestCase):
         self.assertEqual(result, 2)
         self.assertIn("Passwords do not match.", stderr.getvalue())
         self.assertEqual(self.read_hash(), "")
+
+    def test_production_layout_selects_shared_data_directory_for_cli(self):
+        import manage
+
+        with patch.dict(os.environ, {"EPN_DATA_DIR": ""}), patch.object(manage.Path, "is_dir", return_value=True):
+            manage._configure_runtime_data_dir(Path("/opt/epn-recipe-box/current/manage.py"))
+            self.assertEqual(os.environ["EPN_DATA_DIR"], "/var/lib/epn-recipe-box")
 
 
 if __name__ == "__main__":
