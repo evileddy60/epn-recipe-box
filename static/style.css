@@ -206,6 +206,7 @@
       color: var(--muted);
       font-size: .9rem;
     }
+    .small code { overflow-wrap: anywhere; word-break: break-word; }
     .summary { margin: 9px 0 12px; }
     .badges { display: flex; flex-wrap: wrap; gap: 7px; margin: 8px 0; align-items: center; }
     .badge { border-radius: 999px; padding: 5px 9px; background: rgba(53,92,125,.12); color: var(--blue); border: 1px solid rgba(53,92,125,.24); font-size: .8rem; font-weight: 750; }
