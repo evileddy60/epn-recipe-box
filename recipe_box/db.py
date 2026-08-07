@@ -561,20 +561,28 @@ def community_home_data(limit: int = 6) -> dict:
     }
 
 
-def create_account(email: str, password: str) -> str:
+def normalize_nickname(nickname: str) -> str:
+    normalized = " ".join(nickname.strip().split())
+    if not normalized or len(normalized) > MAX_NICKNAME_LENGTH:
+        raise ValueError("Nickname must be between 1 and 80 characters.")
+    return normalized
+
+
+def create_account(email: str, password: str, nickname: str | None = None) -> str:
     email = email.strip().lower()
     if len(email) > MAX_EMAIL_LENGTH or not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
         raise ValueError("Enter a valid email address.")
     if not 8 <= len(password) <= 128:
         raise ValueError("Password must be between 8 and 128 characters.")
+    normalized_nickname = normalize_nickname(nickname) if nickname is not None else ""
     user_id = f"u-{uuid.uuid4().hex[:10]}"
     with db_connect() as conn:
         conn.execute(
             """
-            INSERT INTO users (id, email, password_hash, created_at)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO users (id, email, password_hash, nickname, created_at)
+            VALUES (?, ?, ?, ?, ?)
             """,
-            (user_id, email.lower(), generate_password_hash(password), now_iso()),
+            (user_id, email, generate_password_hash(password), normalized_nickname, now_iso()),
         )
     return user_id
 

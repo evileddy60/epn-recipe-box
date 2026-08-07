@@ -27,6 +27,9 @@ class ApiFoundationTests(unittest.TestCase):
         self.user_id = recipe_app.create_account("api@example.com", "correct-horse")
         recipe_app.update_profile(self.user_id, "API Cook", "Private test account", "")
         recipe_app.app.config.update(TESTING=True, ENFORCE_CSRF=True)
+        from recipe_box import security
+
+        security._FAILED_LOGINS.clear()
         self.client = recipe_app.app.test_client()
 
     def tearDown(self):
@@ -61,6 +64,84 @@ class ApiFoundationTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 201)
         return response.get_json()
+
+    def test_signup_never_logs_password_or_hash(self):
+        from recipe_box import security
+
+        security._FAILED_LOGINS.clear()
+        with self.assertLogs("recipe_box.security", level="WARNING") as captured:
+            response = self.client.post(
+                "/api/v1/auth/signup",
+                json={"email": "log-check@example.com", "password": "short", "nickname": "Cook"},
+            )
+        self.assertEqual(response.status_code, 422)
+        logs = "\n".join(captured.output)
+        self.assertNotIn("short", logs)
+        self.assertNotIn("password_hash", logs)
+
+    def test_native_signup_issues_token_and_persists_profile_without_exposing_hash(self):
+        response = self.client.post(
+            "/api/v1/auth/signup",
+            json={"email": "new-cook@example.com", "password": "correct-horse", "nickname": "New Cook"},
+        )
+        self.assertEqual(response.status_code, 201)
+        payload = response.get_json()
+        self.assertTrue(payload["token"])
+        self.assertEqual(payload["user"]["email"], "new-cook@example.com")
+        self.assertEqual(payload["user"]["nickname"], "New Cook")
+        serialized = json.dumps(payload)
+        self.assertNotIn("password", serialized.lower())
+        self.assertNotIn("password_hash", serialized.lower())
+        me = self.client.get("/api/v1/me", headers={"Authorization": f"Bearer {payload['token']}"})
+        self.assertEqual(me.status_code, 200)
+        with self.recipe_app.db_connect() as conn:
+            row = conn.execute("SELECT password_hash, nickname FROM users WHERE email = ?", ("new-cook@example.com",)).fetchone()
+        self.assertNotEqual(row["password_hash"], "correct-horse")
+        self.assertEqual(row["nickname"], "New Cook")
+
+    def test_native_signup_validation_duplicate_and_structured_errors(self):
+        cases = [
+            ({}, "Email, password, and nickname are required."),
+            ({"email": "bad", "password": "correct-horse", "nickname": "Cook"}, "Enter a valid email address."),
+            ({"email": "new@example.com", "password": "short", "nickname": "Cook"}, "Password must be between 8 and 128 characters."),
+            ({"email": "new@example.com", "password": "x" * 129, "nickname": "Cook"}, "Password must be between 8 and 128 characters."),
+            ({"email": "new@example.com", "password": "correct-horse", "nickname": ""}, "Nickname must be between 1 and 80 characters."),
+            (
+                {"email": "new@example.com", "password": "correct-horse", "nickname": "x" * 81},
+                "Nickname must be between 1 and 80 characters.",
+            ),
+        ]
+        for body, message in cases:
+            response = self.client.post("/api/v1/auth/signup", json=body)
+            self.assertEqual(response.status_code, 422)
+            self.assertEqual(response.get_json()["error"]["code"], "VALIDATION_ERROR")
+            self.assertEqual(response.get_json()["error"]["message"], message)
+        duplicate = self.client.post(
+            "/api/v1/auth/signup",
+            json={"email": " API@example.com ", "password": "correct-horse", "nickname": "Another"},
+        )
+        self.assertEqual(duplicate.status_code, 409)
+        self.assertEqual(duplicate.get_json()["error"]["code"], "ACCOUNT_EXISTS")
+
+    def test_native_signup_reuses_rate_limit_and_browser_signup_contract(self):
+        from recipe_box import security
+
+        security._FAILED_LOGINS.clear()
+        for _ in range(5):
+            response = self.client.post(
+                "/api/v1/auth/signup",
+                json={"email": "limited@example.com", "password": "short", "nickname": "Cook"},
+            )
+            self.assertEqual(response.status_code, 422)
+        limited = self.client.post(
+            "/api/v1/auth/signup",
+            json={"email": "limited@example.com", "password": "correct-horse", "nickname": "Cook"},
+        )
+        self.assertEqual(limited.status_code, 429)
+        self.assertEqual(limited.get_json()["error"]["code"], "RATE_LIMITED")
+        browser = self.client.get("/signup")
+        self.assertEqual(browser.status_code, 200)
+        self.assertIn("Create account", browser.get_data(as_text=True))
 
     def test_health_is_public_and_does_not_expose_secrets(self):
         response = self.client.get("/api/v1/health")
