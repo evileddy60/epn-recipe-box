@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import importlib.util
+import io
 import json
 import os
 import subprocess
 import tarfile
 import tempfile
 import unittest
+from importlib.machinery import SourceFileLoader
 from pathlib import Path
+from unittest import mock
 
 
 class ReleaseInstallerTests(unittest.TestCase):
@@ -121,5 +125,67 @@ class ReleaseInstallerTests(unittest.TestCase):
         self.assertIn('run("systemctl", "disable", "--now", LEGACY_SERVICE', source)
 
 
-if __name__ == "__main__":
-    unittest.main()
+class ReadinessRetryTests(unittest.TestCase):
+    installer = Path(__file__).parents[1] / "deploy" / "epn-recipe-box-release-deploy"
+
+    @classmethod
+    def load_installer(cls):
+        loader = SourceFileLoader("recipe_box_release_installer", str(cls.installer))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        assert spec is not None
+        module = importlib.util.module_from_spec(spec)
+        loader.exec_module(module)
+        return module
+
+    @staticmethod
+    def response(payload, status=200):
+        body = json.dumps(payload).encode()
+        response = mock.MagicMock()
+        response.status = status
+        response.read.return_value = body
+        response.__enter__.return_value = response
+        response.__exit__.return_value = None
+        return response
+
+    def test_activation_delayed_startup_retries_connection_refused_then_succeeds(self):
+        module = self.load_installer()
+        results = iter([(False, "service inactive"), (False, "expected one listener"), (True, "ready")])
+        with mock.patch.object(module, "readiness_check_once", side_effect=lambda: next(results)), mock.patch.object(module.time, "sleep"):
+            module.wait_for_readiness(initial_delay=1, retry_interval=1, max_attempts=15)
+
+    def test_rollback_delayed_startup_uses_same_bounded_gate(self):
+        module = self.load_installer()
+        results = iter([(False, "connection/timeout (URLError)"), (True, "ready")])
+        with mock.patch.object(module, "readiness_check_once", side_effect=lambda: next(results)), mock.patch.object(module.time, "sleep"):
+            module.wait_for_readiness(initial_delay=1, retry_interval=1, max_attempts=15)
+        source = self.installer.read_text(encoding="utf-8")
+        activate_block = source[source.index("def activate"):source.index("def rollback")]
+        rollback_block = source[source.index("def rollback"):source.index("def main")]
+        self.assertIn("health()", activate_block)
+        self.assertIn("health()", rollback_block)
+
+    def test_persistent_failure_is_bounded_and_reports_last_reason(self):
+        module = self.load_installer()
+        with mock.patch.object(module, "readiness_check_once", return_value=(False, "service inactive")), mock.patch.object(module.time, "sleep") as sleep:
+            with self.assertRaisesRegex(SystemExit, "expired after 3 attempts: service inactive"):
+                module.wait_for_readiness(initial_delay=1, retry_interval=1, max_attempts=3)
+        self.assertEqual(sleep.call_count, 3)
+
+    def test_wrong_schema_and_malformed_health_are_distinguished(self):
+        module = self.load_installer()
+        with mock.patch.object(module, "urlopen", return_value=self.response({"status": "ok", "database": "ok", "schema_version": 13})):
+            self.assertEqual(module._health_probe("http://test")[1], "wrong schema (13)")
+        malformed = self.response(None)
+        malformed.read.return_value = b"not-json"
+        with mock.patch.object(module, "urlopen", return_value=malformed):
+            self.assertIn("malformed health response", module._health_probe("http://test")[1])
+
+    def test_expected_listener_and_health_schema_are_required(self):
+        module = self.load_installer()
+        active = subprocess.CompletedProcess([], 0, "active\n", "")
+        listener_missing = subprocess.CompletedProcess([], 0, "State Recv-Q Send-Q Local Address:Port\n", "")
+        with mock.patch.object(module, "run", side_effect=[active, listener_missing]):
+            ready, reason = module.readiness_check_once()
+        self.assertFalse(ready)
+        self.assertIn("expected one listener", reason)
+

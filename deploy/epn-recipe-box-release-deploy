@@ -11,7 +11,9 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 from pathlib import Path
+from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
 
 PREFIX = Path(os.environ.get("EPN_RECIPE_BOX_ROOT", "/opt/epn-recipe-box"))
@@ -176,11 +178,68 @@ def stage(archive_arg: str, checksum_arg: str) -> str:
     return release_id
 
 
-def health() -> None:
+def _health_probe(url: str) -> tuple[bool, str]:
+    try:
+        with urlopen(url, timeout=20) as response:
+            if response.status != 200:
+                return False, f"non-200 ({response.status})"
+            try:
+                payload = json.loads(response.read().decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                return False, f"malformed health response ({exc.__class__.__name__})"
+            if not isinstance(payload, dict):
+                return False, "malformed health response (not an object)"
+            if payload.get("status") != "ok" or payload.get("database") != "ok":
+                return False, "health status/database is not ok"
+            if payload.get("schema_version") != EXPECTED_SCHEMA:
+                return False, f"wrong schema ({payload.get('schema_version')!r})"
+            return True, "ok"
+    except HTTPError as exc:
+        return False, f"non-200 ({exc.code})"
+    except (TimeoutError, URLError, OSError) as exc:
+        return False, f"connection/timeout ({exc.__class__.__name__})"
+
+
+def _listener_probe() -> tuple[bool, str]:
+    result = run("ss", "-ltn", check=False)
+    listeners = [line for line in result.stdout.splitlines() if "127.0.0.1:5055" in line]
+    if len(listeners) != 1:
+        return False, f"expected one listener on 127.0.0.1:5055, found {len(listeners)}"
+    return True, "ok"
+
+
+def readiness_check_once() -> tuple[bool, str]:
+    active = run("systemctl", "is-active", SERVICE, check=False)
+    if active.returncode != 0 or active.stdout.strip() != "active":
+        return False, "service inactive"
+    listener_ok, listener_reason = _listener_probe()
+    if not listener_ok:
+        return False, listener_reason
     for url in (HEALTH_URL, TAILSCALE_HEALTH_URL):
         if url:
-            with urlopen(url, timeout=20) as response:
-                if response.status >= 400: fail(f"health check failed: {url}")
+            health_ok, health_reason = _health_probe(url)
+            if not health_ok:
+                return False, f"{url}: {health_reason}"
+    return True, "ready"
+
+
+def wait_for_readiness(*, initial_delay: float = 1.0, retry_interval: float = 1.0, max_attempts: int = 15) -> None:
+    if max_attempts < 1:
+        fail("readiness max_attempts must be positive")
+    time.sleep(initial_delay)
+    last_reason = "not attempted"
+    for attempt in range(1, max_attempts + 1):
+        ready, reason = readiness_check_once()
+        if ready:
+            return
+        last_reason = reason
+        if attempt < max_attempts:
+            time.sleep(retry_interval)
+    fail(f"service readiness expired after {max_attempts} attempts: {last_reason}")
+
+
+def health() -> None:
+    wait_for_readiness()
 
 
 def restore(backup_path: str) -> None:
