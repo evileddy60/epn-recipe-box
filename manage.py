@@ -10,9 +10,8 @@ from pathlib import Path
 
 
 def _configure_runtime_data_dir(script_path: Path) -> None:
-    production_root = Path("/opt/epn-recipe-box/current")
     production_data = Path("/var/lib/epn-recipe-box")
-    if not os.environ.get("EPN_DATA_DIR") and script_path.parent == production_root and production_data.is_dir():
+    if not os.environ.get("EPN_DATA_DIR") and production_data.is_dir():
         os.environ["EPN_DATA_DIR"] = str(production_data)
 
 
