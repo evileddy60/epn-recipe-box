@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -8,7 +9,7 @@ import secrets
 import shutil
 import sqlite3
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from flask import session
@@ -16,6 +17,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 
 from sync import token_hash
 from .config import *
+from .config import runtime_secret_key
 from .migrations import migrate_database, schema_version
 from .policies import can_view_recipe, normalize_visibility
 
@@ -602,6 +604,76 @@ def reset_account_password(email: str, password: str) -> bool:
             (password_hash, normalized_email),
         )
     return result.rowcount == 1
+
+
+def _reset_code_hash(code: str) -> str:
+    return hmac.new(runtime_secret_key().encode("utf-8"), code.encode("ascii"), hashlib.sha256).hexdigest()
+
+
+def create_password_reset_challenge(email: str, lifetime_minutes: int) -> dict[str, str] | None:
+    """Create one shared web-link/mobile-code challenge; raw secrets leave this function only."""
+    normalized_email = email.strip().lower()
+    if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", normalized_email):
+        return None
+    now = now_iso()
+    expires_at = (datetime.now(timezone.utc) + timedelta(minutes=lifetime_minutes)).isoformat(timespec="seconds")
+    web_token = secrets.token_urlsafe(32)
+    code = f"{secrets.randbelow(1_000_000):06d}"
+    with db_connect() as conn:
+        user = conn.execute("SELECT id FROM users WHERE lower(email) = ?", (normalized_email,)).fetchone()
+        if not user:
+            return None
+        conn.execute("UPDATE password_reset_tokens SET used_at = ? WHERE user_id = ? AND used_at IS NULL", (now, user["id"]))
+        conn.execute(
+            "INSERT INTO password_reset_tokens (id, user_id, token_hash, code_hash, web_token_hash, created_at, expires_at, code_attempts) VALUES (?, ?, ?, ?, ?, ?, ?, 0)",
+            (f"reset-{uuid.uuid4().hex}", user["id"], token_hash(web_token), _reset_code_hash(code), token_hash(web_token), now, expires_at),
+        )
+    return {"web_token": web_token, "code": code}
+
+
+def create_password_reset_token(email: str, lifetime_minutes: int) -> str | None:
+    challenge = create_password_reset_challenge(email, lifetime_minutes)
+    return challenge["web_token"] if challenge else None
+
+
+def _reset_password_for_user(conn: sqlite3.Connection, user_id: str, password: str, now: str) -> None:
+    conn.execute("UPDATE users SET password_hash = ? WHERE id = ?", (generate_password_hash(password), user_id))
+    conn.execute("UPDATE password_reset_tokens SET used_at = ? WHERE user_id = ? AND used_at IS NULL", (now, user_id))
+    conn.execute("UPDATE api_tokens SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL", (now, user_id))
+
+
+def reset_password_with_token(token: str, password: str) -> str:
+    """Consume a valid web token and revoke all bearer tokens for that account."""
+    if not isinstance(token, str) or not token or len(token) > 512:
+        return "invalid_token"
+    if not isinstance(password, str) or not 8 <= len(password) <= 128:
+        return "invalid_password"
+    now = now_iso()
+    with db_connect() as conn:
+        row = conn.execute("SELECT id, user_id FROM password_reset_tokens WHERE token_hash = ? AND used_at IS NULL AND expires_at > ?", (token_hash(token), now)).fetchone()
+        if not row:
+            return "invalid_token"
+        _reset_password_for_user(conn, row["user_id"], password, now)
+    return "ok"
+
+
+def reset_password_with_code(email: str, code: str, password: str) -> str:
+    if not isinstance(email, str) or not isinstance(code, str) or not re.fullmatch(r"\d{6}", code):
+        return "invalid_code"
+    if not isinstance(password, str) or not 8 <= len(password) <= 128:
+        return "invalid_password"
+    now = now_iso()
+    normalized_email = email.strip().lower()
+    with db_connect() as conn:
+        row = conn.execute("SELECT password_reset_tokens.id, password_reset_tokens.user_id, code_hash, code_attempts FROM password_reset_tokens JOIN users ON users.id = password_reset_tokens.user_id WHERE lower(users.email) = ? AND used_at IS NULL AND expires_at > ? ORDER BY password_reset_tokens.created_at DESC LIMIT 1", (normalized_email, now)).fetchone()
+        if not row or row["code_attempts"] >= 5:
+            return "invalid_code"
+        if not hmac.compare_digest(row["code_hash"] or "", _reset_code_hash(code)):
+            attempts = row["code_attempts"] + 1
+            conn.execute("UPDATE password_reset_tokens SET code_attempts = ?, used_at = CASE WHEN ? >= 5 THEN ? ELSE used_at END WHERE id = ?", (attempts, attempts, now, row["id"]))
+            return "invalid_code"
+        _reset_password_for_user(conn, row["user_id"], password, now)
+    return "ok"
 
 
 def authenticate_user(email: str, password: str) -> str | None:

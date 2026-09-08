@@ -7,14 +7,15 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 
-from flask import Blueprint, g, jsonify, request, send_from_directory, url_for
+from flask import Blueprint, current_app, g, jsonify, request, send_from_directory, url_for
 
 from sync import token_hash
 from . import config as _config
 from .config import *
 from .db import *
 from .domain import remove_recipe_image, save_avatar, save_recipe_image
-from .security import login_allowed, login_retry_after, record_login_failure, record_login_success
+from .security import login_allowed, login_retry_after, password_reset_allowed, record_login_failure, record_login_success, record_password_reset_request
+from .mail import send_password_reset_email
 from .policies import can_delete_comment, can_edit_comment, can_hide_comment, can_unhide_comment
 
 
@@ -23,6 +24,7 @@ MAX_API_BODY_BYTES = 64 * 1024
 MAX_API_PAGE_SIZE = 50
 MAX_API_SEARCH_LENGTH = 200
 MAX_API_TAGS = 12
+GENERIC_RESET_MESSAGE = "If an account exists for that email, password reset instructions have been sent."
 
 
 def _error(code: str, message: str, status: int, details: dict | None = None):
@@ -209,6 +211,50 @@ def login():
         )
         row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
     return jsonify({"token": token, "token_type": "Bearer", "expires_at": expires_at, "user": _user_payload(row)})
+
+
+@bp.route("/auth/forgot-password", methods=["POST"])
+def forgot_password():
+    payload = _json_body() or {}
+    email = payload.get("email", "") if isinstance(payload.get("email", ""), str) else ""
+    email = email.strip().lower()
+    if email and password_reset_allowed(email):
+        record_password_reset_request(email)
+        init_db()
+        challenge = create_password_reset_challenge(email, PASSWORD_RESET_CODE_TTL_MINUTES)
+        if challenge:
+            try:
+                send_password_reset_email(email, public_reset_url(challenge["web_token"]), challenge["code"], PASSWORD_RESET_CODE_TTL_MINUTES)
+            except Exception:
+                current_app.logger.exception("password_reset_delivery_failed")
+    return jsonify({"message": GENERIC_RESET_MESSAGE}), 202
+
+
+@bp.route("/auth/reset-password", methods=["POST"])
+def reset_password():
+    payload = _json_body() or {}
+    if "code" in payload or "email" in payload:
+        email = payload.get("email")
+        code = payload.get("code")
+        password = payload.get("new_password")
+        if not all(isinstance(value, str) for value in (email, code, password)):
+            return _error("INVALID_RESET", "The password reset request is invalid or expired.", 400)
+        result = reset_password_with_code(email, code, password)
+        if result == "invalid_password":
+            return _error("VALIDATION_ERROR", "Password must be between 8 and 128 characters.", 422)
+        if result != "ok":
+            return _error("INVALID_RESET", "The password reset request is invalid or expired.", 400)
+        return jsonify({"message": "Your password has been reset. You can now sign in."})
+    token = payload.get("token")
+    password = payload.get("new_password")
+    if not isinstance(token, str) or not isinstance(password, str):
+        return _error("INVALID_RESET", "The password reset link is invalid or expired.", 400)
+    result = reset_password_with_token(token, password)
+    if result == "invalid_password":
+        return _error("VALIDATION_ERROR", "Password must be between 8 and 128 characters.", 422)
+    if result != "ok":
+        return _error("INVALID_RESET", "The password reset link is invalid or expired.", 400)
+    return jsonify({"message": "Your password has been reset. You can now sign in."})
 
 
 @bp.route("/auth/logout", methods=["POST"])

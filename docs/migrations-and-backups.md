@@ -14,6 +14,8 @@ The original legacy schema (including `users.name`), synchronization schema, and
 
 The current schema version adds recipe image metadata and local archive state, followed by the user-local favorites table and explicit comment moderation audit fields. Existing recipes and comments receive empty image metadata, null archive timestamps, and null moderation fields; no row is deleted. Recipe-owner hiding is recorded separately from author deletion.
 
+Migration 15 adds `password_reset_tokens`. It stores only SHA-256 token digests, creation/expiry timestamps, and one-time-use timestamps; raw reset tokens are delivered only through the configured mail backend and are never persisted.
+
 Startup calls the runner on every initialization. If no pending version exists, no migration is repeated.
 ## Backup tool
 

@@ -5,7 +5,7 @@ import os
 import sqlite3
 import uuid
 
-from flask import Blueprint, abort, flash, jsonify, redirect, render_template, request, send_file, send_from_directory, session, url_for
+from flask import Blueprint, abort, current_app, flash, jsonify, redirect, render_template, request, send_file, send_from_directory, session, url_for
 
 from . import config as _config
 from .config import *
@@ -14,6 +14,8 @@ from .domain import *
 from .exchange import build_exchange, recipe_fingerprint, validate_exchange_payload
 from .sync_service import *
 from .security import login_allowed, login_retry_after, record_login_failure, record_login_success, rotate_session
+from .security import password_reset_allowed, record_password_reset_request
+from .mail import send_password_reset_email
 from .policies import can_delete_comment, can_edit_comment, can_hide_comment, can_unhide_comment
 
 bp = Blueprint("main", __name__)
@@ -138,6 +140,43 @@ def index():
         community=community,
         active="recipes",
     )
+
+
+@bp.route("/forgot-password", methods=["GET", "POST"])
+def forgot_password_page():
+    if request.method == "GET" and request.args.get("sent") == "1":
+        return render_template("forgot_password_sent.html", title=APP_TITLE, user=None, active="profile")
+    if request.method == "POST":
+        email = request.form.get("email", "").strip().lower()
+        if email and password_reset_allowed(email):
+            record_password_reset_request(email)
+            init_db()
+            challenge = create_password_reset_challenge(email, PASSWORD_RESET_CODE_TTL_MINUTES)
+            if challenge:
+                try:
+                    send_password_reset_email(email, public_reset_url(challenge["web_token"]), challenge["code"], PASSWORD_RESET_CODE_TTL_MINUTES)
+                except Exception:
+                    current_app.logger.exception("password_reset_delivery_failed")
+        return redirect(url_for("forgot_password_page", sent="1"))
+    return render_template("forgot_password.html", title=APP_TITLE, user=None, active="profile")
+
+
+@bp.route("/reset-password", methods=["GET", "POST"])
+def reset_password_page():
+    token = request.values.get("token", "")
+    if request.method == "POST":
+        password = request.form.get("new_password", "")
+        confirmation = request.form.get("confirmation", "")
+        if password != confirmation:
+            return render_template("reset_password.html", title=APP_TITLE, user=None, token=token, error="Passwords do not match."), 422
+        result = reset_password_with_token(token, password)
+        if result == "invalid_password":
+            return render_template("reset_password.html", title=APP_TITLE, user=None, token=token, error="Password must be between 8 and 128 characters."), 422
+        if result != "ok":
+            return render_template("reset_password.html", title=APP_TITLE, user=None, token=token, error="This password reset link is invalid or expired."), 400
+        flash("Your password has been reset. You can now sign in.")
+        return redirect(url_for("signup"))
+    return render_template("reset_password.html", title=APP_TITLE, user=None, token=token)
 
 
 @bp.route("/signup", methods=["GET", "POST"])

@@ -12,9 +12,12 @@ from markupsafe import Markup, escape
 logger = logging.getLogger("recipe_box.security")
 
 _FAILED_LOGINS: dict[str, list[float]] = {}
+_PASSWORD_RESET_REQUESTS: dict[str, list[float]] = {}
 LOGIN_WINDOW_SECONDS = 300
 LOGIN_MAX_FAILURES = 5
 LOGIN_LOCKOUT_SECONDS = 60
+PASSWORD_RESET_WINDOW_SECONDS = 900
+PASSWORD_RESET_MAX_REQUESTS = 5
 
 
 def csrf_token() -> str:
@@ -84,6 +87,25 @@ def login_retry_after(identifier: str) -> int:
     if len(attempts) < LOGIN_MAX_FAILURES:
         return 0
     return max(1, int(LOGIN_LOCKOUT_SECONDS - (time.monotonic() - attempts[0])))
+
+
+def password_reset_allowed(identifier: str) -> bool:
+    import time
+
+    key = identifier.strip().lower()
+    now = time.monotonic()
+    attempts = [value for value in _PASSWORD_RESET_REQUESTS.get(key, []) if now - value < PASSWORD_RESET_WINDOW_SECONDS]
+    _PASSWORD_RESET_REQUESTS[key] = attempts
+    return len(attempts) < PASSWORD_RESET_MAX_REQUESTS
+
+
+def record_password_reset_request(identifier: str) -> None:
+    import time
+
+    key = identifier.strip().lower()
+    now = time.monotonic()
+    attempts = [value for value in _PASSWORD_RESET_REQUESTS.get(key, []) if now - value < PASSWORD_RESET_WINDOW_SECONDS]
+    _PASSWORD_RESET_REQUESTS[key] = (attempts + [now])[-PASSWORD_RESET_MAX_REQUESTS:]
 
 
 def _safe_identifier(identifier: str) -> str:

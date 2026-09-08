@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 16
 
 # Compact fixtures represent the three schemas that have existed in the project.
 HISTORICAL_SCHEMAS = {
@@ -264,6 +264,29 @@ def _migration_14(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_comments_hidden_by ON comments(hidden_by_user_id)")
 
 
+def _migration_15(conn: sqlite3.Connection) -> None:
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS password_reset_tokens (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            token_hash TEXT NOT NULL UNIQUE,
+            created_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            used_at TEXT,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_user ON password_reset_tokens(user_id);
+        CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_expiry ON password_reset_tokens(expires_at);
+    """)
+
+
+def _migration_16(conn: sqlite3.Connection) -> None:
+    conn.execute("ALTER TABLE password_reset_tokens ADD COLUMN code_hash TEXT")
+    conn.execute("ALTER TABLE password_reset_tokens ADD COLUMN web_token_hash TEXT")
+    conn.execute("ALTER TABLE password_reset_tokens ADD COLUMN code_attempts INTEGER NOT NULL DEFAULT 0")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_password_reset_tokens_web_token ON password_reset_tokens(web_token_hash)")
+
+
 def _ordered_migrations() -> tuple[Migration, ...]:
     return (
         (1, _migration_1),
@@ -280,6 +303,8 @@ def _ordered_migrations() -> tuple[Migration, ...]:
         (12, _migration_12),
         (13, _migration_13),
         (14, _migration_14),
+        (15, _migration_15),
+        (16, _migration_16),
     )
 
 

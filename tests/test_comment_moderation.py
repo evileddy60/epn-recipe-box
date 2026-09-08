@@ -73,8 +73,8 @@ class CommentModerationTests(unittest.TestCase):
                 conn.executescript(migrations.HISTORICAL_SCHEMAS["legacy"])
                 conn.execute("INSERT INTO recipes VALUES ('r','legacy-user','Recipe','','','','[]','[]','now','now')")
                 conn.execute("INSERT INTO comments VALUES ('c','r','legacy-user','old','then')")
-            self.assertEqual(migrations.migrate_database(path), 14)
-            self.assertEqual(migrations.migrate_database(path), 14)
+            self.assertEqual(migrations.migrate_database(path), 16)
+            self.assertEqual(migrations.migrate_database(path), 16)
             with sqlite3.connect(path) as conn:
                 columns = {row[1] for row in conn.execute("PRAGMA table_info(comments)")}
                 self.assertTrue({"hidden_at", "hidden_by_user_id"} <= columns)
